@@ -25,11 +25,11 @@ for i in $(ls /data/app/ | grep -E 'com.android|com.google.android'); do
     unzip /data/app/$i -d $gtmp;
     chmod 644 $gtmp/lib/arm*/*;
     mount -o remount,rw /system;
-    cp -fp $gtmp/lib/arm*/* /system/lib/ 2>>$log;
+    cp -fp $gtmp/lib/arm*/* /system/lib/;
     rm -rf $gtmp;
 
     # overwrite /system APK with new /data APK
-    cp -f /data/app/$i $sysapk 2>>$log;
+    cp -f /data/app/$i $sysapk;
     chown root.root $sysapk;
     chmod 644 $sysapk;
     mount -o remount,ro /system;
