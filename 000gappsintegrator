@@ -8,34 +8,120 @@ gtmp=/data/local/tmp/gapp;
 log=/sdcard/gapps-integrator.log;
 
 test ! -f $log && echo -e "## GApps Auto-Integration Script Log\n" > $log;
-echo `date` >> $log;
+echo -n `date` >> $log;
+
+# get SDK version to perform different actions due to /data/app layout changes 
+sdkver=`getprop ro.build.version.sdk`;
 
 # find new unintegrated Google Apps APKs in /data
 for i in $(ls /data/app/ | grep -E 'com.android|com.google.android'); do
 
   # find equivalent /system APK name and only process if it exists
-  sysapk=`grep "updated-package name=\"$(echo $i | cut -d- -f1)" /data/system/packages.xml | cut -d\" -f4`;
+  xml=/data/system/packages.xml;
+  package=`echo $i | cut -d- -f1`;
+  sysapk=`grep "updated-package name=\"$package" $xml | grep -o 'codePath=.*$' | cut -d\" -f2`;
 
-  echo "/data/app/$i $sysapk" >> $log;
+  echo -ne "\n/data/app/$i $sysapk" >> $log;
 
   if [ "$sysapk" ]; then
 
-    # extract and force copy libraries to /system
-    mkdir -p $gtmp;
-    unzip /data/app/$i -d $gtmp;
-    chmod 644 $gtmp/lib/arm*/*;
-    mount -o remount,rw /system;
-    cp -fp $gtmp/lib/arm*/* /system/lib/;
-    rm -rf $gtmp;
+    # compare /data and /system APK versions and only integrate if /data is newer (necessary on Lollipop and above)
+    datver=$(grep "codePath=\"/data/app/$i" $xml | grep -o 'version=.*$' | cut -d\" -f2);
+    sysver=$(grep "codePath=\"$sysapk" $xml | grep -o 'version=.*$' | cut -d\" -f2);
 
-    # overwrite /system APK with new /data APK
-    cp -f /data/app/$i $sysapk;
-    chown root.root $sysapk;
-    chmod 644 $sysapk;
-    mount -o remount,ro /system;
+    if [ "$datver" -gt "$sysver" ]; then
+
+      echo -n " ($datver > $sysver)" >> $log;
+
+      # KitKat (and below) support
+      if [ "$sdkver" -le 20 ]; then
+
+        # extract and force copy libraries to /system
+        mkdir -p $gtmp;
+        unzip /data/app/$i -d $gtmp;
+        chmod 644 $gtmp/lib/arm*/*;
+        mount -o remount,rw /system;
+        cp -fp $gtmp/lib/arm*/* /system/lib/;
+        rm -rf $gtmp;
+
+        # overwrite /system APK with new /data APK then fix permissions
+        cp -f /data/app/$i $sysapk;
+        chown root.root $sysapk;
+        chmod 644 $sysapk;
+
+      # Lollipop support
+      elif [ "$sdkver" -le 22 ]; then
+
+        # force copy libraries to /system respecting symlinks then clean up empty files
+        mount -o remount,rw /system;
+        cp -RLf /data/app/$i/lib $sysapk;
+        for j in `ls $sysapk/lib/arm*/*`; do
+          test ! -s $j && rm -f $j;
+        done;
+
+        # overwrite /system APK with new /data APK then fix permissions
+        cp -fp /data/app/$i/base.apk $sysapk/`basename $sysapk`.apk;
+        chown -R root.root $sysapk;
+        chmod 644 $sysapk/lib/arm*/*;
+
+        # update packages.xml entry for the /system APK and remove entry for /data APK
+        sed -i "s#<package name=\"${package}\" codePath=\"/data/app/${i}\" nativeLibraryPath=\"/data/app/${i}/lib\" \(.*\) installer=\"com.android.vending\">#<package name=\"${package}\" codePath=\"${sysapk}\" nativeLibraryPath=\"${sysapk}/lib\" \1>#";
+        sed -i -e "/<updated-package name=\"${package}/,/<\/updated-package>/d" $xml;
+
+        # flag for cleanup on reboot following optimization
+        touch /data/app/$i/integrated;
+
+      # Marshmallow (and above) support
+      elif [ "$sdkver" -ge 23 ]; then
+
+        # if necessary force copy libraries to /system respecting symlinks then clean up empty files
+        mount -o remount,rw /system;
+        if [ -d $sysapk/lib ]; then
+          cp -RLf /data/app/$i/lib $sysapk;
+          for j in `ls $sysapk/lib/arm*/*`; do
+            test ! -s $j && rm -f $j;
+          done;
+        fi;
+
+        # if necessary force copy APK odex file to /system
+        if [ -d $sysapk/oat ]; then
+          cp -fp /data/app/$i/oat/arm*/base.odex $sysapk/oat/arm*/`basename $sysapk`.odex;
+        fi;
+
+        # overwrite /system APK with new /data APK then fix permissions
+        cp -fp /data/app/$i/base.apk $sysapk/`basename $sysapk`.apk;
+        chown -R root.root $sysapk;
+        chmod 644 $sysapk/lib/arm*/* $sysapk/oat/arm*/*;
+
+        # update packages.xml entry for the /system APK
+        sed -i "s#<package name=\"${package}\" codePath=\"/data/app/${i}\" nativeLibraryPath=\"/data/app/${i}/lib\" \(.*\) installer=\"com.android.vending\">#<package name=\"${package}\" codePath=\"${sysapk}\" nativeLibraryPath=\"${sysapk}/lib\" \1>#";
+        sed -i -e "/<updated-package name=\"${package}/,/<\/updated-package>/d" $xml;
+
+        # flag for cleanup on reboot following optimization
+        touch /data/app/$i/integrated;
+
+      fi;
+      mount -o remount,ro /system;
+
+    fi;
+  elif [ -f /data/app/$i/integrated ]; then
+
+    # clean up to mimic pre-Lollipop (AOSP) behavior
+    rm -rf /data/app/$i;
 
   fi;
 done;
 
-echo -e "---\n" >> $log;
+# global cleanups required on Lollipop (and above)
+if [ "$sdkver" -ge 21 ]; then
+
+  # fix /system/lib permissions to ensure libs copied via symlink are correct
+  mount -o remount,rw /system;
+  chown root.root /system/lib/*.so;
+  chmod 644 /system/lib/*.so;
+  mount -o remount,ro /system;
+
+fi;
+
+echo -e "\n---\n" >> $log;
 
