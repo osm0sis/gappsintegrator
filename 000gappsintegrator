@@ -24,7 +24,7 @@ for i in $(ls /data/app/ | grep -E 'com.android|com.google.android'); do
   # find equivalent /system APK name and only process if it exists
   xml=/data/system/packages.xml;
   package=`echo $i | cut -d- -f1`;
-  sysapk=`grep "updated-package name=\"$package" $xml | grep -o 'codePath=.*$' | cut -d\" -f2`;
+  sysapk=`grep "updated-package name=\"$package\"" $xml | grep -o 'codePath=.*$' | cut -d\" -f2`;
 
   logbuff echo -ne "\n/data/app/$i $sysapk";
 
@@ -65,7 +65,7 @@ for i in $(ls /data/app/ | grep -E 'com.android|com.google.android'); do
       # Lollipop support
       elif [ "$sdkver" -le 22 ]; then
 
-        # save time on boots after APK work has been completed but apps are awaiting optimzation
+        # save time on boots after APK work has been completed but apps are awaiting optimization
         if [ ! -f /data/app/$i/integrated ]; then
 
           # remove libraries from copied APK and zipalign if the binaries exist
@@ -73,17 +73,18 @@ for i in $(ls /data/app/ | grep -E 'com.android|com.google.android'); do
           if [ "$(zip --help)" -a "$(zipalign --help 2>&1)" ]; then
 
             # workaround for Chrome not playing by the usual rules (per usual)
-            if [ "$(basename $sysapk)" == "Chrome" ]; then
-              mount -o remount,rw /system;
-              rm -f $sysapk/lib/arm*/libchrome.so;
-            else
+            case $(basename $sysapk) in
+              *Chrome*)
+                mount -o remount,rw /system;
+                rm -f $sysapk/lib/arm*/libchrome.so;;
+              *)
 
-              cp -fp $datapk $gtmp/preopt-$i.apk;
-              zip -d $gtmp/preopt-$i.apk lib/*;
-              zipalign -v 4 $gtmp/preopt-$i.apk $gtmp/$i.apk;
-              datapk=$gtmp/$i.apk;
+                cp -fp $datapk $gtmp/preopt-$i.apk;
+                zip -d $gtmp/preopt-$i.apk lib/*;
+                zipalign -v 4 $gtmp/preopt-$i.apk $gtmp/$i.apk;
+                datapk=$gtmp/$i.apk;;
 
-            fi;
+            esac;
           fi;
 
           # force copy libraries to /system respecting symlinks then clean up empty files
@@ -108,7 +109,7 @@ for i in $(ls /data/app/ | grep -E 'com.android|com.google.android'); do
       # Marshmallow (and above) support
       elif [ "$sdkver" -ge 23 ]; then
 
-        # save time on boots after APK work has been completed but apps are awaiting optimzation
+        # save time on boots after APK work has been completed but apps are awaiting optimization
         if [ ! -f /data/app/$i/integrated ]; then
 
           # if necessary force copy libraries to /system respecting symlinks then clean up empty files
