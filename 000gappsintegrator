@@ -19,7 +19,7 @@ gtmp=/data/local/tmp/gapp;
 sdkver=`getprop ro.build.version.sdk`;
 
 # find new unintegrated Google Apps APKs in /data
-for i in $(ls /data/app/ | grep -E 'com.android|com.google.android'); do
+for i in $(ls /data/app/ | grep -E 'com.android|com.google.android|com.chrome'); do
 
   # find equivalent /system APK name and only process if it exists
   xml=/data/system/packages.xml;
