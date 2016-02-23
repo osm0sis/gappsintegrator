@@ -7,6 +7,17 @@
 logbuff() { logbuff+="$($*)"; }
 writable() { touch $1/tmpfile 2>/dev/null; ret=$?; rm $1/tmpfile 2>/dev/null; echo $ret; }
 
+# quick and dirty math to figure out if the next integration will likely have enough free space in /system
+freespace() {
+  free=$(df -Pm /system 2>/dev/null | tail -n 1 | awk '{ print $4 }' | cut -d. -f1);
+  libsize=$(unzip -l $1 "lib/*" | tail -n 1 | awk '{ print $1 }');
+  test $libsize -lt 1048576 && libsize=1 || libsize=$((libsize / 1048576));
+  datapksize=$(du -m $1 | awk '{ print $1 }');
+  sysapksize=$(du -m $2 | awk '{ print $1 }');
+  need=$((datapksize + libsize - sysapksize));
+  test $free -gt $need; echo $?;
+}
+
 # wait for /system to become remountable/writable
 until [ "$(mount -o remount,rw /system >/dev/null; writable /system; mount -o remount,ro /system >/dev/null)" == 0 ]; do
   sleep 1;
@@ -18,12 +29,15 @@ gtmp=/data/local/tmp/gapp;
 # get SDK version to perform different actions due to /data/app layout changes 
 sdkver=`getprop ro.build.version.sdk`;
 
+# check for zip and zipalign binaries to determine integration method
+test "$(which zip)" -a "$(which zipalign)" && zipbins=1;
+
 # find new unintegrated Google Apps APKs in /data
 for i in $(ls /data/app/ | grep -E 'com.android|com.google.android|com.chrome'); do
 
   # find equivalent /system APK name and only process if it exists
   xml=/data/system/packages.xml;
-  package=`echo $i | cut -d- -f1`;
+  package=`echo $i | rev | cut -d- -f2- | rev`;
   sysapk=`grep "updated-package name=\"$package\"" $xml | grep -o 'codePath=.*$' | cut -d\" -f2`;
 
   logbuff echo -ne "\n/data/app/$i $sysapk";
@@ -31,20 +45,26 @@ for i in $(ls /data/app/ | grep -E 'com.android|com.google.android|com.chrome');
   if [ "$sysapk" ]; then
 
     # compare /data and /system APK versions and only integrate if /data is newer (necessary on Lollipop and above)
-    datver=$(grep "codePath=\"/data/app/$i" $xml | grep -o 'version=.*$' | cut -d\" -f2);
-    sysver=$(grep "codePath=\"$sysapk" $xml | grep -o 'version=.*$' | cut -d\" -f2);
+    datver=$(grep "codePath=\"/data/app/$i\"" $xml | grep -o 'version=.*$' | cut -d\" -f2);
+    sysver=$(grep "codePath=\"$sysapk\"" $xml | grep -o 'version=.*$' | cut -d\" -f2);
 
     if [ "$datver" -gt "$sysver" ]; then
 
-      logbuff echo -ne "\t ($datver > $sysver)";
+      logbuff echo -ne "\x20($datver > $sysver)";
       mkdir -p $gtmp;
 
       # KitKat (and below) support
       if [ "$sdkver" -le 20 ]; then
+        datapk=/data/app/$i;
+
+        # skip current APK if it fails a free space check
+        if [ "$(freespace $datapk $sysapk)" != 0 ]; then
+          logbuff echo -ne "\x20*";
+          continue;
+        fi;
 
         # remove libraries from copied APK and zipalign if the binaries exist
-        datapk=/data/app/$i;
-        if [ "$(zip --help)" -a "$(zipalign --help 2>&1)" ]; then
+        if [ "$zipbins" ]; then
           cp -fp $datapk $gtmp/preopt-$i;
           zip -d $gtmp/preopt-$i lib/*;
           zipalign -v 4 $gtmp/preopt-$i $gtmp/$i;
@@ -52,10 +72,11 @@ for i in $(ls /data/app/ | grep -E 'com.android|com.google.android|com.chrome');
         fi;
 
         # extract and force copy libraries to /system
-        unzip /data/app/$i -d $gtmp;
-        chmod 644 $gtmp/lib/arm*/*;
+        unzip /data/app/$i -d $gtmp lib/*;
+        chmod 644 $gtmp/lib/*/*;
         mount -o remount,rw /system;
-        cp -fp $gtmp/lib/arm*/* /system/lib/;
+        rm -f $sysapk;
+        cp -fp $gtmp/lib/*/* /system/lib/;
 
         # overwrite /system APK with new /data APK then fix permissions
         cp -f $datapk $sysapk;
@@ -64,19 +85,26 @@ for i in $(ls /data/app/ | grep -E 'com.android|com.google.android|com.chrome');
 
       # Lollipop support
       elif [ "$sdkver" -le 22 ]; then
+        datapk=/data/app/$i/base.apk;
+        sysname=`basename $sysapk`;
 
         # save time on boots after APK work has been completed but apps are awaiting optimization
         if [ ! -f /data/app/$i/integrated ]; then
 
+          # skip current APK if it fails a free space check
+          if [ "$(freespace $datapk $sysapk/$sysname.apk)" != 0 ]; then
+            logbuff echo -ne "\x20*";
+            continue;
+          fi;
+
           # remove libraries from copied APK and zipalign if the binaries exist
-          datapk=/data/app/$i/base.apk;
-          if [ "$(zip --help)" -a "$(zipalign --help 2>&1)" ]; then
+          if [ "$zipbins" ]; then
 
             # workaround for Chrome not playing by the usual rules (per usual)
-            case $(basename $sysapk) in
-              *Chrome*)
+            case $package in
+              com.android.chrome|com.chrome.*)
                 mount -o remount,rw /system;
-                rm -f $sysapk/lib/arm*/libchrome.so;;
+                rm -f $sysapk/lib/*/libchrome.so;;
               *)
 
                 cp -fp $datapk $gtmp/preopt-$i.apk;
@@ -89,54 +117,89 @@ for i in $(ls /data/app/ | grep -E 'com.android|com.google.android|com.chrome');
 
           # force copy libraries to /system respecting symlinks then clean up empty files
           mount -o remount,rw /system;
+          rm -f $sysapk/$sysname.apk;
           cp -RLf /data/app/$i/lib $sysapk;
-          for j in `ls $sysapk/lib/arm*/*`; do
+          for j in `ls $sysapk/lib/*/*`; do
             test ! -s $j && rm -f $j;
           done;
 
           # overwrite /system APK with new /data APK then fix permissions
-          cp -fp $datapk $sysapk/`basename $sysapk`.apk;
+          cp -fp $datapk $sysapk/$sysname.apk;
           chown -R root.root $sysapk;
-          chmod 644 $sysapk/*.apk $sysapk/lib/arm*/*;
+          chmod -R 755 $sysapk/lib;
+          chmod 644 $sysapk/$sysname.apk $sysapk/lib/*/*;
 
           # flag for cleanup on reboot following optimization
           touch /data/app/$i/integrated;
 
         fi;
         # remove packages.xml entry for /data APK
-        sed -i -e "/<updated-package name=\"${package}/,/<\/updated-package>/d" $xml;
+        sed -i -e "/<updated-package name=\"${package}\"/,/<\/updated-package>/d" $xml;
 
       # Marshmallow (and above) support
       elif [ "$sdkver" -ge 23 ]; then
+        datapk=/data/app/$i/base.apk;
+        sysname=`basename $sysapk`;
 
         # save time on boots after APK work has been completed but apps are awaiting optimization
         if [ ! -f /data/app/$i/integrated ]; then
 
-          # if necessary force copy libraries to /system respecting symlinks then clean up empty files
-          mount -o remount,rw /system;
-          if [ -d $sysapk/lib ]; then
-            cp -RLf /data/app/$i/lib $sysapk;
-            for j in `ls $sysapk/lib/arm*/*`; do
-              test ! -s $j && rm -f $j;
-            done;
+          # skip current APK if it fails a free space check
+          if [ "$(freespace $datapk $sysapk/$sysname.apk)" != 0 ]; then
+            logbuff echo -ne "\x20*";
+            continue;
           fi;
 
+          # decompress libraries within copied APK and zipalign if the binaries exist (maintains Marshmallow and above structure)
+          if [ "$zipbins" ]; then
+
+            unzip $datapk -d $gtmp lib/*;
+            cp -fp $datapk $gtmp/preopt-$i.apk;
+            zip -d $gtmp/preopt-$i.apk lib/*;
+            cd $gtmp;
+            zip -r -0 -D $gtmp/preopt-$i.apk lib/;
+            zipalign -p 4 $gtmp/preopt-$i.apk $gtmp/$i.apk;
+            datapk=$gtmp/$i.apk;
+
+          else
+            # exclude APKs that cause breakage with the fallback method
+            case $package in
+              com.google.android.tts)
+                logbuff echo -ne "\x20!";
+                continue;;
+            esac;
+
+            # otherwise force copy libraries to /system respecting symlinks then clean up empty files
+            if [ -e /data/app/$i/lib/* ]; then
+              mount -o remount,rw /system;
+              rm -f $sysapk/$sysname.apk;
+              cp -RLf /data/app/$i/lib $sysapk;
+              for j in `ls $sysapk/lib/*/*`; do
+                test ! -s $j && rm -f $j;
+              done;
+            fi;
+
+          fi;
           # if necessary force copy APK odex file to /system
+          mount -o remount,rw /system;
           if [ -d $sysapk/oat ]; then
-            cp -fp /data/app/$i/oat/arm*/base.odex $sysapk/oat/arm*/`basename $sysapk`.odex;
+            cp -fp /data/app/$i/oat $sysapk;
+            cd $sysapk/oat/*/;
+            mv base.odex $sysname.odex;
           fi;
 
           # overwrite /system APK with new /data APK then fix permissions
-          cp -fp /data/app/$i/base.apk $sysapk/`basename $sysapk`.apk;
+          cp -fp $datapk $sysapk/$sysname.apk;
           chown -R root.root $sysapk;
-          chmod 644 $sysapk/lib/arm*/* $sysapk/oat/arm*/*;
+          chmod -R 755 $sysapk/lib $sysapk/oat;
+          chmod 644 $sysapk/$sysname.apk $sysapk/lib/*/* $sysapk/oat/*/*;
 
           # flag for cleanup on reboot following optimization
           touch /data/app/$i/integrated;
 
         fi;
         # remove packages.xml entry for /data APK
-        sed -i -e "/<updated-package name=\"${package}/,/<\/updated-package>/d" $xml;
+        sed -i -e "/<updated-package name=\"${package}\"/,/<\/updated-package>/d" $xml;
 
       fi;
       mount -o remount,ro /system;
@@ -146,7 +209,7 @@ for i in $(ls /data/app/ | grep -E 'com.android|com.google.android|com.chrome');
   elif [ -f /data/app/$i/integrated ]; then
 
     # clean up to mimic pre-Lollipop (AOSP) behavior
-    rm -rf /data/app/$i;
+    rm -rf /data/app/$package-*;
 
   fi;
 done;
@@ -169,6 +232,6 @@ until [ "$(writable /sdcard)" == 0 ]; do
   sleep 1;
 done;
 log=/sdcard/gapps-integrator.log;
-test ! -f $log && echo -e "## GApps Auto-Integration Script Log\n" > $log;
+test ! -f $log && echo -e "## GApps Auto-Integration Script Log\n#\n# * = not enough free space, ! = excluded\n" > $log;
 echo -e "$logbuff\n" >> $log;
 
