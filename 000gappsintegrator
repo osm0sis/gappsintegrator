@@ -9,7 +9,8 @@ writable() { touch $1/tmpfile 2>/dev/null; ret=$?; rm $1/tmpfile 2>/dev/null; ec
 
 # quick and dirty math to figure out if the next integration will likely have enough free space in /system
 freespace() {
-  free=$(df -Pm /system 2>/dev/null | tail -n 1 | awk '{ print $4 }' | cut -d. -f1);
+  free=$(df -Pm /system 2>/dev/null | tail -n 1 | awk '{ print $4 }');
+  case $free in *K) free=0;; *M) free=`echo $free | cut -d. -f1`;; *G) free=$((`echo $free | cut -d. -f1` * 1024));; esac;
   libsize=$(unzip -l $1 "lib/*" | tail -n 1 | awk '{ print $1 }');
   test $libsize -lt 1048576 && libsize=1 || libsize=$((libsize / 1048576));
   datapksize=$(du -m $1 | awk '{ print $1 }');
@@ -17,6 +18,12 @@ freespace() {
   need=$((datapksize + libsize - sysapksize));
   test $free -gt $need; echo $?;
 }
+
+# create log/change filedate immediately to indicate script is active once /sdcard is available
+log=/sdcard/gapps-integrator.log;
+until [ "$(writable /sdcard; touch $log)" == 0 ]; do
+  sleep 1;
+done&
 
 # wait for /system to become remountable/writable
 until [ "$(mount -o remount,rw /system >/dev/null; writable /system; mount -o remount,ro /system >/dev/null)" == 0 ]; do
@@ -66,8 +73,8 @@ for i in $(ls /data/app/ | grep -E 'com.android|com.google.android|com.chrome');
         # remove libraries from copied APK and zipalign if the binaries exist
         if [ "$zipbins" ]; then
           cp -fp $datapk $gtmp/preopt-$i;
-          zip -d $gtmp/preopt-$i lib/*;
-          zipalign -v 4 $gtmp/preopt-$i $gtmp/$i;
+          zip -d $gtmp/preopt-$i lib/*/*;
+          zipalign 4 $gtmp/preopt-$i $gtmp/$i;
           datapk=$gtmp/$i;
         fi;
 
@@ -108,8 +115,8 @@ for i in $(ls /data/app/ | grep -E 'com.android|com.google.android|com.chrome');
               *)
 
                 cp -fp $datapk $gtmp/preopt-$i.apk;
-                zip -d $gtmp/preopt-$i.apk lib/*;
-                zipalign -v 4 $gtmp/preopt-$i.apk $gtmp/$i.apk;
+                zip -d $gtmp/preopt-$i.apk lib/*/*;
+                zipalign 4 $gtmp/preopt-$i.apk $gtmp/$i.apk;
                 datapk=$gtmp/$i.apk;;
 
             esac;
@@ -150,12 +157,19 @@ for i in $(ls /data/app/ | grep -E 'com.android|com.google.android|com.chrome');
             continue;
           fi;
 
-          # decompress libraries within copied APK and zipalign if the binaries exist (maintains Marshmallow and above structure)
+          # decompress libraries within copied APK and zipalign if the binaries exist (maintains proper Marshmallow and above structure)
           if [ "$zipbins" ]; then
+
+            # exclude APKs that cause breakage after integration
+            case $package in
+              com.google.android.inputmethod.*|com.google.android.tts)
+                logbuff echo -ne "\x20!";
+                continue;;
+            esac;
 
             unzip $datapk -d $gtmp lib/*;
             cp -fp $datapk $gtmp/preopt-$i.apk;
-            zip -d $gtmp/preopt-$i.apk lib/*;
+            zip -d $gtmp/preopt-$i.apk lib/*/*;
             cd $gtmp;
             zip -r -0 -D $gtmp/preopt-$i.apk lib/;
             zipalign -p 4 $gtmp/preopt-$i.apk $gtmp/$i.apk;
@@ -205,6 +219,10 @@ for i in $(ls /data/app/ | grep -E 'com.android|com.google.android|com.chrome');
       mount -o remount,ro /system;
       rm -rf $gtmp;
 
+    else
+      # clean up any duplicate packages that are not the current active copy
+      rm -rf /data/app/$i;
+
     fi;
   elif [ -f /data/app/$i/integrated ]; then
 
@@ -222,6 +240,7 @@ if [ "$sdkver" -ge 21 ]; then
   chown root.root /system/lib/*.so;
   chmod 644 /system/lib/*.so;
   mount -o remount,ro /system;
+  rm -rf $gtmp;
 
 fi;
 
@@ -231,7 +250,6 @@ logbuff echo -e "\n---";
 until [ "$(writable /sdcard)" == 0 ]; do
   sleep 1;
 done;
-log=/sdcard/gapps-integrator.log;
-test ! -f $log && echo -e "## GApps Auto-Integration Script Log\n#\n# * = not enough free space, ! = excluded\n" > $log;
+test ! -s $log && echo -e "## GApps Auto-Integration Script Log\n#\n# * = not enough free space, ! = excluded\n" > $log;
 echo -e "$logbuff\n" >> $log;
 
