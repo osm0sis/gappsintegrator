@@ -9,7 +9,7 @@ writable() { touch $1/tmpfile 2>/dev/null; ret=$?; rm $1/tmpfile 2>/dev/null; ec
 
 # quick and dirty math to figure out if the next integration will likely have enough free space in /system
 freespace() {
-  free=$(df -Pm /system 2>/dev/null | tail -n 1 | awk '{ print $4 }');
+  free=$(df -Ph /system 2>/dev/null | tail -n 1 | awk '{ print $4 }');
   case $free in *K) free=0;; *M) free=`echo $free | cut -d. -f1`;; *G) free=$((`echo $free | cut -d. -f1` * 1024));; esac;
   libsize=$(unzip -l $1 "lib/*" | tail -n 1 | awk '{ print $1 }');
   test $libsize -lt 1048576 && libsize=1 || libsize=$((libsize / 1048576));
@@ -40,7 +40,7 @@ sdkver=`getprop ro.build.version.sdk`;
 test "$(which zip)" -a "$(which zipalign)" && zipbins=1;
 
 # find new unintegrated Google Apps APKs in /data
-for i in $(ls /data/app/ | grep -E 'com.android|com.google.android|com.chrome'); do
+for i in $(ls /data/app/ | grep -E '^com.android|^com.google.android|^com.chrome'); do
 
   # find equivalent /system APK name and only process if it exists
   xml=/data/system/packages.xml;
@@ -151,6 +151,13 @@ for i in $(ls /data/app/ | grep -E 'com.android|com.google.android|com.chrome');
         # save time on boots after APK work has been completed but apps are awaiting optimization
         if [ ! -f /data/app/$i/integrated ]; then
 
+          # exclude APKs that cause breakage after integration
+          case $package in
+            com.google.android.inputmethod.*|com.google.android.tts)
+              logbuff echo -ne "\x20!";
+              continue;;
+          esac;
+
           # skip current APK if it fails a free space check
           if [ "$(freespace $datapk $sysapk/$sysname.apk)" != 0 ]; then
             logbuff echo -ne "\x20*";
@@ -159,14 +166,6 @@ for i in $(ls /data/app/ | grep -E 'com.android|com.google.android|com.chrome');
 
           # decompress libraries within copied APK and zipalign if the binaries exist (maintains proper Marshmallow and above structure)
           if [ "$zipbins" ]; then
-
-            # exclude APKs that cause breakage after integration
-            case $package in
-              com.google.android.inputmethod.*|com.google.android.tts)
-                logbuff echo -ne "\x20!";
-                continue;;
-            esac;
-
             unzip $datapk -d $gtmp lib/*;
             cp -fp $datapk $gtmp/preopt-$i.apk;
             zip -d $gtmp/preopt-$i.apk lib/*/*;
@@ -176,13 +175,6 @@ for i in $(ls /data/app/ | grep -E 'com.android|com.google.android|com.chrome');
             datapk=$gtmp/$i.apk;
 
           else
-            # exclude APKs that cause breakage with the fallback method
-            case $package in
-              com.google.android.tts)
-                logbuff echo -ne "\x20!";
-                continue;;
-            esac;
-
             # otherwise force copy libraries to /system respecting symlinks then clean up empty files
             if [ -e /data/app/$i/lib/* ]; then
               mount -o remount,rw /system;
