@@ -10,8 +10,8 @@ writable() { touch $1/tmpfile 2>/dev/null; ret=$?; rm $1/tmpfile 2>/dev/null; ec
 # quick and dirty math to figure out if the next integration will likely have enough free space in /system
 freespace() {
   free=$(df -Ph /system 2>/dev/null | tail -n 1 | awk '{ print $4 }');
-  case $free in *K) free=0;; *M) free=`echo $free | cut -d. -f1`;; *G) free=$((`echo $free | cut -d. -f1` * 1024));; esac;
-  libsize=$(unzip -l $1 "lib/*" | tail -n 1 | awk '{ print $1 }');
+  case $free in *K) free=0;; *M) free=`echo $free | cut -dM -f1 | cut -d. -f1`;; *G) free=$((`echo $free | cut -dG -f1 | cut -d. -f1` * 1024));; esac;
+  libsize=0; for i in $(unzip -l $1 "lib/*" 2>/dev/null | tail -n +4 | awk '{ print $1 }'); do libsize=$((libsize + i)); done;
   test $libsize -lt 1048576 && libsize=1 || libsize=$((libsize / 1048576));
   datapksize=$(du -m $1 | awk '{ print $1 }');
   sysapksize=$(du -m $2 | awk '{ print $1 }');
@@ -33,6 +33,21 @@ done;
 logbuff echo -n `date`;
 gtmp=/data/local/tmp/gapp;
 
+# test for and try to ensure a working basic script environment, often broken in Marshmallow (AOSP)
+if [ ! "$(which awk)" ]; then
+  logbuff echo -ne "\n\x20* Missing script environment element detected: awk";
+  abort=1;
+fi;
+if [ ! "$(echo testing | sed 's/test/pass/')" == "passing" ]; then
+  logbuff echo -ne "\n\x20* Broken script environment element detected: sed";
+  if [ "$(echo testing | busybox sed 's/test/pass/')" == "passing" ]; then
+    logbuff echo -ne "\n\x20* -- using busybox sed instead";
+    bb=busybox;
+  else
+    abort=1;
+  fi;
+fi;
+
 # get SDK version to perform different actions due to /data/app layout changes 
 sdkver=`getprop ro.build.version.sdk`;
 
@@ -41,6 +56,9 @@ test "$(which zip)" -a "$(which zipalign)" && zipbins=1;
 
 # find new unintegrated Google Apps APKs in /data
 for i in $(ls /data/app/ | grep -E '^com.android|^com.google.android|^com.chrome'); do
+
+  # skip all if script environment is broken
+  test "$abort" && break;
 
   # find equivalent /system APK name and only process if it exists
   xml=/data/system/packages.xml;
@@ -140,8 +158,10 @@ for i in $(ls /data/app/ | grep -E '^com.android|^com.google.android|^com.chrome
           touch /data/app/$i/integrated;
 
         fi;
-        # remove packages.xml entry for /data APK
-        sed -i -e "/<updated-package name=\"${package}\"/,/<\/updated-package>/d" $xml;
+        # remove packages.xml entry for /data APK and ensure proper ownernship/permissions
+        $bb sed -i "/<updated-package name=\"${package}\"/,/<\/updated-package>/d" $xml;
+        chown system:system $xml;
+        chmod 660 $xml;
 
       # Marshmallow (and above) support
       elif [ "$sdkver" -ge 23 ]; then
@@ -204,8 +224,10 @@ for i in $(ls /data/app/ | grep -E '^com.android|^com.google.android|^com.chrome
           touch /data/app/$i/integrated;
 
         fi;
-        # remove packages.xml entry for /data APK
-        sed -i -e "/<updated-package name=\"${package}\"/,/<\/updated-package>/d" $xml;
+        # remove packages.xml entry for /data APK and ensure proper ownernship/permissions
+        $bb sed -i "/<updated-package name=\"${package}\"/,/<\/updated-package>/d" $xml;
+        chown system:system $xml;
+        chmod 660 $xml;
 
       fi;
       mount -o remount,ro /system;
@@ -244,4 +266,7 @@ until [ "$(writable /sdcard)" == 0 ]; do
 done;
 test ! -s $log && echo -e "## GApps Auto-Integration Script Log\n#\n# * = not enough free space, ! = excluded\n" > $log;
 echo -e "$logbuff\n" >> $log;
+
+# limit log length to ~16Kb (when exceeded) by removing oldest entry
+test "$(du -k $log | cut -f1)" -gt 16 && $bb sed -i "/$(grep -m1 -vE '^$|^#.*$' $log)/,/^\s*$/d" $log;
 
