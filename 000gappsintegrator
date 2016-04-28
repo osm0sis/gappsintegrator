@@ -7,15 +7,22 @@
 logbuff() { logbuff+="$($*)"; }
 writable() { touch $1/tmpfile 2>/dev/null; ret=$?; rm $1/tmpfile 2>/dev/null; echo $ret; }
 
-# quick and dirty math to figure out if the next integration will likely have enough free space in /system
+# figure out if the next integration will likely have enough free space in /system
 freespace() {
   free=$(df -Ph /system 2>/dev/null | tail -n 1 | awk '{ print $4 }');
   case $free in *K) free=0;; *M) free=`echo $free | cut -dM -f1 | cut -d. -f1`;; *G) free=$((`echo $free | cut -dG -f1 | cut -d. -f1` * 1024));; esac;
-  libsize=0; for i in $(unzip -l $1 "lib/*" 2>/dev/null | tail -n +4 | awk '{ print $1 }'); do libsize=$((libsize + i)); done;
-  test $libsize -lt 1048576 && libsize=1 || libsize=$((libsize / 1048576));
+  libsize=0; buffer=5;
+  if [ ! "$zipbins" ]; then
+    for entry in $(unzip -l $1 "lib/*" 2>/dev/null | tail -n +4 | awk '{ print $1 }'); do
+      test $entry != "--------" && libsize=$((libsize + entry)) || break;
+    done;
+    test $libsize -lt 1048576 && libsize=1 || libsize=$((libsize / 1048576));
+  else
+    buffer=10;
+  fi;
   datapksize=$(du -m $1 | awk '{ print $1 }');
   sysapksize=$(du -m $2 | awk '{ print $1 }');
-  need=$((datapksize + libsize - sysapksize));
+  need=$((datapksize + libsize - sysapksize + buffer));
   test $free -gt $need; echo $?;
 }
 
@@ -34,10 +41,12 @@ logbuff echo -n `date`;
 gtmp=/data/local/tmp/gapp;
 
 # test for and try to ensure a working basic script environment, often broken in Marshmallow (AOSP)
-if [ ! "$(which awk)" ]; then
-  logbuff echo -ne "\n\x20* Missing script environment element detected: awk";
-  abort=1;
-fi;
+for i in awk sed tail unzip; do
+  if [ ! "$(which $i)" ]; then
+    logbuff echo -ne "\n\x20* Missing script environment element detected: $i";
+    abort=1;
+  fi;
+done;
 if [ ! "$(echo testing | sed 's/test/pass/')" == "passing" ]; then
   logbuff echo -ne "\n\x20* Broken script environment element detected: sed";
   if [ "$(echo testing | busybox sed 's/test/pass/')" == "passing" ]; then
@@ -81,6 +90,13 @@ for i in $(ls /data/app/ | grep -E '^com.android|^com.google.android|^com.chrome
       # KitKat (and below) support
       if [ "$sdkver" -le 20 ]; then
         datapk=/data/app/$i;
+
+        # exclude APKs that cause breakage after integration
+        case $package in
+          com.google.android.apps.messaging|com.google.android.apps.photos|com.google.android.apps.plus|com.google.android.talk|com.google.android.youtube)
+            logbuff echo -ne "\x20!";
+            continue;;
+        esac;
 
         # skip current APK if it fails a free space check
         if [ "$(freespace $datapk $sysapk)" != 0 ]; then
