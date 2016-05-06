@@ -189,7 +189,7 @@ for i in $(ls /data/app/ | grep -E '^com.android|^com.google.android|^com.chrome
 
           # exclude APKs that cause breakage after integration
           case $package in
-            com.google.android.inputmethod.*|com.google.android.tts)
+            com.google.android.calendar|com.google.android.inputmethod.*|com.google.android.tts|com.google.android.webview)
               logbuff echo -ne "\x20!";
               continue;;
           esac;
