@@ -12,8 +12,8 @@ freespace() {
   free=$(df -Ph /system 2>/dev/null | tail -n 1 | awk '{ print $4 }');
   case $free in *K) free=0;; *M) free=`echo $free | cut -dM -f1 | cut -d. -f1`;; *G) free=$((`echo $free | cut -dG -f1 | cut -d. -f1` * 1024));; esac;
   libsize=0; buffer=5;
-  if [ ! "$zipbins" ]; then
-    for entry in $(unzip -l $1 "lib/*" 2>/dev/null | tail -n +4 | awk '{ print $1 }'); do
+  if [ "$nozipbins" ]; then
+    for entry in $(unzip -l $1 lib/* 2>/dev/null | tail -n +4 | awk '{ print $1 }'); do
       test $entry != "--------" && libsize=$((libsize + entry)) || break;
     done;
     test $libsize -lt 1048576 && libsize=1 || libsize=$((libsize / 1048576));
@@ -57,11 +57,17 @@ if [ ! "$(echo testing | sed 's/test/pass/')" == "passing" ]; then
   fi;
 fi;
 
+# check for zip and zipalign binaries to determine integration method
+for i in zip zipalign; do
+  if [ ! "$(which $i)" ]; then
+    logbuff echo -ne "\n\x20* Missing binary for primary integration method: $i";
+    nozipbins=1;
+  fi;
+done;
+test "$nozipbins" && logbuff echo -ne "\n\x20* -- using fallback method instead";
+
 # get SDK version to perform different actions due to /data/app layout changes 
 sdkver=`getprop ro.build.version.sdk`;
-
-# check for zip and zipalign binaries to determine integration method
-test "$(which zip)" -a "$(which zipalign)" && zipbins=1;
 
 # find new unintegrated Google Apps APKs in /data
 for i in $(ls /data/app/ | grep -E '^com.android|^com.google.android|^com.chrome'); do
@@ -93,7 +99,7 @@ for i in $(ls /data/app/ | grep -E '^com.android|^com.google.android|^com.chrome
 
         # exclude APKs that cause breakage after integration
         case $package in
-          com.google.android.apps.messaging|com.google.android.apps.photos|com.google.android.apps.plus|com.google.android.talk|com.google.android.youtube)
+          com.google.android.apps.messaging|com.google.android.apps.photos|com.google.android.apps.plus|com.google.android.street|com.google.android.talk|com.google.android.youtube)
             logbuff echo -ne "\x20!";
             continue;;
         esac;
@@ -105,7 +111,7 @@ for i in $(ls /data/app/ | grep -E '^com.android|^com.google.android|^com.chrome
         fi;
 
         # remove libraries from copied APK and zipalign if the binaries exist
-        if [ "$zipbins" ]; then
+        if [ ! "$nozipbins" ]; then
           cp -fp $datapk $gtmp/preopt-$i;
           zip -d $gtmp/preopt-$i lib/*/*;
           zipalign 4 $gtmp/preopt-$i $gtmp/$i;
@@ -139,7 +145,7 @@ for i in $(ls /data/app/ | grep -E '^com.android|^com.google.android|^com.chrome
           fi;
 
           # remove libraries from copied APK and zipalign if the binaries exist
-          if [ "$zipbins" ]; then
+          if [ ! "$nozipbins" ]; then
 
             # workaround for Chrome not playing by the usual rules (per usual)
             case $package in
@@ -187,13 +193,6 @@ for i in $(ls /data/app/ | grep -E '^com.android|^com.google.android|^com.chrome
         # save time on boots after APK work has been completed but apps are awaiting optimization
         if [ ! -f /data/app/$i/integrated ]; then
 
-          # exclude APKs that cause breakage after integration
-          case $package in
-            com.google.android.calendar|com.google.android.inputmethod.*|com.google.android.tts|com.google.android.webview)
-              logbuff echo -ne "\x20!";
-              continue;;
-          esac;
-
           # skip current APK if it fails a free space check
           if [ "$(freespace $datapk $sysapk/$sysname.apk)" != 0 ]; then
             logbuff echo -ne "\x20*";
@@ -201,7 +200,7 @@ for i in $(ls /data/app/ | grep -E '^com.android|^com.google.android|^com.chrome
           fi;
 
           # decompress libraries within copied APK and zipalign if the binaries exist (maintains proper Marshmallow and above structure)
-          if [ "$zipbins" ]; then
+          if [ ! "$nozipbins" ]; then
             unzip $datapk -d $gtmp lib/*;
             cp -fp $datapk $gtmp/preopt-$i.apk;
             zip -d $gtmp/preopt-$i.apk lib/*/*;
@@ -236,6 +235,12 @@ for i in $(ls /data/app/ | grep -E '^com.android|^com.google.android|^com.chrome
           chmod -R 755 $sysapk/lib $sysapk/oat;
           chmod 644 $sysapk/$sysname.apk $sysapk/lib/*/* $sysapk/oat/*/*;
 
+          # flag APKs that cause breakage after integration for workaround during cleanup
+          case $package in
+            com.google.android.calendar|com.google.android.inputmethod.*|com.google.android.tts|com.google.android.webview)
+              touch /data/app/$i/forcerebuild;;
+          esac;
+
           # flag for cleanup on reboot following optimization
           touch /data/app/$i/integrated;
 
@@ -259,6 +264,12 @@ for i in $(ls /data/app/ | grep -E '^com.android|^com.google.android|^com.chrome
     # clean up to mimic pre-Lollipop (AOSP) behavior
     rm -rf /data/app/$package-*;
 
+    # if necessary force a rebuild of permissions lists
+    if [ -f /data/app/$i/forcerebuild ]; then
+      rm -f /data/system/users/*/runtime-permissions.xml;
+      logbuff echo -ne "\x20~";
+    fi;
+
   fi;
 done;
 
@@ -280,7 +291,7 @@ logbuff echo -e "\n---";
 until [ "$(writable /sdcard)" == 0 ]; do
   sleep 1;
 done;
-test ! -s $log && echo -e "## GApps Auto-Integration Script Log\n#\n# * = not enough free space, ! = excluded\n" > $log;
+test ! -s $log && echo -e "## GApps Auto-Integration Script Log\n#\n# ~ = forced permissions list rebuild,\n# * = not enough free space, ! = excluded\n" > $log;
 echo -e "$logbuff\n" >> $log;
 
 # limit log length to ~16Kb (when exceeded) by removing oldest entry
