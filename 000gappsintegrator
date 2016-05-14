@@ -26,22 +26,33 @@ freespace() {
   test $free -gt $need; echo $?;
 }
 
+# loop counter timeout limits for device writability
+sdlimit=600; syslimit=120;
+
 # create log/change filedate immediately to indicate script is active once /sdcard is available
 log=/sdcard/gapps-integrator.log;
-until [ "$(writable /sdcard; touch $log)" == 0 ]; do
+counter1=0;
+until [ "$(writable /sdcard; touch $log)" == 0 -o "$counter1" -gt "$sdlimit" ]; do
   sleep 1;
+  counter1=$((counter1 + 1));
 done&
 
-# wait for /system to become remountable/writable
-until [ "$(mount -o remount,rw /system >/dev/null; writable /system; mount -o remount,ro /system >/dev/null)" == 0 ]; do
+# wait for /system to become remountable/writable, abort if it does not
+counter2=0;
+until [ "$(mount -o remount,rw /system >/dev/null; writable /system; mount -o remount,ro /system >/dev/null)" == 0 -o "$counter2" -gt "$syslimit" ]; do
   sleep 1;
+  counter2=$((counter2 + 1));
 done;
+if [ "$counter2" -gt "$syslimit" ]; then
+  logbuff echo -ne "\n\x20* Fatal error: /system did not become remountable/writable during boot";
+  abort=1;
+fi;
 
 logbuff echo -n `date`;
 gtmp=/data/local/tmp/gapp;
 
 # test for and try to ensure a working basic script environment, often broken in Marshmallow (AOSP)
-for i in awk sed tail unzip; do
+for i in awk sed tail unzip which; do
   if [ ! "$(which $i)" ]; then
     logbuff echo -ne "\n\x20* Missing script environment element detected: $i";
     abort=1;
@@ -180,7 +191,7 @@ for i in $(ls /data/app/ | grep -E '^com.android|^com.google.android|^com.chrome
           touch /data/app/$i/integrated;
 
         fi;
-        # remove packages.xml entry for /data APK and ensure proper ownernship/permissions
+        # remove packages.xml entry for /data APK and ensure proper ownership/permissions
         $bb sed -i "/<updated-package name=\"${package}\"/,/<\/updated-package>/d" $xml;
         chown system:system $xml;
         chmod 660 $xml;
@@ -245,7 +256,7 @@ for i in $(ls /data/app/ | grep -E '^com.android|^com.google.android|^com.chrome
           touch /data/app/$i/integrated;
 
         fi;
-        # remove packages.xml entry for /data APK and ensure proper ownernship/permissions
+        # remove packages.xml entry for /data APK and ensure proper ownership/permissions
         $bb sed -i "/<updated-package name=\"${package}\"/,/<\/updated-package>/d" $xml;
         chown system:system $xml;
         chmod 660 $xml;
@@ -261,14 +272,14 @@ for i in $(ls /data/app/ | grep -E '^com.android|^com.google.android|^com.chrome
     fi;
   elif [ -f /data/app/$i/integrated ]; then
 
-    # clean up to mimic pre-Lollipop (AOSP) behavior
-    rm -rf /data/app/$package-*;
-
     # if necessary force a rebuild of permissions lists
     if [ -f /data/app/$i/forcerebuild ]; then
       rm -f /data/system/users/*/runtime-permissions.xml;
       logbuff echo -ne "\x20~";
     fi;
+
+    # clean up to mimic pre-Lollipop (AOSP) behavior
+    rm -rf /data/app/$package-*;
 
   fi;
 done;
@@ -287,10 +298,13 @@ fi;
 
 logbuff echo -e "\n---";
 
-# write buffered log once /sdcard is available
-until [ "$(writable /sdcard)" == 0 ]; do
+# write buffered log once /sdcard is available, fallback to a known working location if this fails
+counter3=0;
+until [ "$(writable /sdcard)" == 0 -o "$counter3" -gt "$sdlimit" ]; do
   sleep 1;
+  counter3=$((counter3 + 1));
 done;
+test "$counter3" -gt "$sdlimit" && log=/data/local/gapps-integrator.log;
 test ! -s $log && echo -e "## GApps Auto-Integration Script Log\n#\n# ~ = forced permissions list rebuild,\n# * = not enough free space, ! = excluded\n" > $log;
 echo -e "$logbuff\n" >> $log;
 
