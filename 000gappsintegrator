@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# chmod -R 755 /system/etc/init.d /system/su.d
+# chmod -R 755 /system/etc/init.d /system/su.d /su/su.d
 #
 # ROM GApps Auto-Integration
 # osm0sis @ xda-developers
@@ -78,10 +78,16 @@ done;
 test "$nozipbins" && logbuff echo -ne "\n\x20* -- using fallback method instead";
 
 # get SDK version to perform different actions due to /data/app layout changes 
-sdkver=`getprop ro.build.version.sdk`;
+sdkver=`grep "ro.build.version.sdk" /system/build.prop | cut -d\= -f2`;
+
+# abort if failed to get SDK version
+if [ ! "$sdkver" ]; then
+   abort=1;
+   logbuff echo -ne "\n\x20* -- SDK version unknown";
+fi;
 
 # find new unintegrated Google Apps APKs in /data
-for i in $(ls /data/app/ | grep -E '^com.android|^com.google.android|^com.chrome'); do
+for i in $(ls /data/app/ | grep -E '^com.android|^com.google.android|^com.google.earth|^com.chrome|^com.motorola'); do
 
   # skip all if script environment is broken
   test "$abort" && break;
@@ -131,7 +137,7 @@ for i in $(ls /data/app/ | grep -E '^com.android|^com.google.android|^com.chrome
 
         # extract and force copy libraries to /system
         unzip /data/app/$i -d $gtmp lib/*;
-        chmod 644 $gtmp/lib/*/*;
+        busybox chmod 644 $gtmp/lib/*/*;
         mount -o remount,rw /system;
         rm -f $sysapk;
         cp -fp $gtmp/lib/*/* /system/lib/;
@@ -139,7 +145,7 @@ for i in $(ls /data/app/ | grep -E '^com.android|^com.google.android|^com.chrome
         # overwrite /system APK with new /data APK then fix permissions
         cp -f $datapk $sysapk;
         chown root.root $sysapk;
-        chmod 644 $sysapk;
+        busybox chmod 644 $sysapk;
 
       # Lollipop support
       elif [ "$sdkver" -le 22 ]; then
@@ -184,8 +190,8 @@ for i in $(ls /data/app/ | grep -E '^com.android|^com.google.android|^com.chrome
           # overwrite /system APK with new /data APK then fix permissions
           cp -fp $datapk $sysapk/$sysname.apk;
           chown -R root.root $sysapk;
-          chmod -R 755 $sysapk/lib;
-          chmod 644 $sysapk/$sysname.apk $sysapk/lib/*/*;
+          busybox chmod -R 755 $sysapk/lib;
+          busybox chmod 644 $sysapk/$sysname.apk $sysapk/lib/*/*;
 
           # flag for cleanup on reboot following optimization
           touch /data/app/$i/integrated;
@@ -194,7 +200,7 @@ for i in $(ls /data/app/ | grep -E '^com.android|^com.google.android|^com.chrome
         # remove packages.xml entry for /data APK and ensure proper ownership/permissions
         $bb sed -i "/<updated-package name=\"${package}\"/,/<\/updated-package>/d" $xml;
         chown system:system $xml;
-        chmod 660 $xml;
+        busybox chmod 660 $xml;
 
       # Marshmallow (and above) support
       elif [ "$sdkver" -ge 23 ]; then
@@ -243,8 +249,8 @@ for i in $(ls /data/app/ | grep -E '^com.android|^com.google.android|^com.chrome
           # overwrite /system APK with new /data APK then fix permissions
           cp -fp $datapk $sysapk/$sysname.apk;
           chown -R root.root $sysapk;
-          chmod -R 755 $sysapk/lib $sysapk/oat;
-          chmod 644 $sysapk/$sysname.apk $sysapk/lib/*/* $sysapk/oat/*/*;
+          busybox chmod -R 755 $sysapk/lib $sysapk/oat;
+          busybox chmod 644 $sysapk/$sysname.apk $sysapk/lib/*/* $sysapk/oat/*/*;
 
           # flag APKs that cause breakage after integration for workaround during cleanup
           case $package in
@@ -259,7 +265,7 @@ for i in $(ls /data/app/ | grep -E '^com.android|^com.google.android|^com.chrome
         # remove packages.xml entry for /data APK and ensure proper ownership/permissions
         $bb sed -i "/<updated-package name=\"${package}\"/,/<\/updated-package>/d" $xml;
         chown system:system $xml;
-        chmod 660 $xml;
+        busybox chmod 660 $xml;
 
       fi;
       mount -o remount,ro /system;
@@ -290,7 +296,7 @@ if [ "$sdkver" -ge 21 ]; then
   # fix /system/lib permissions to ensure libs copied via symlink are correct
   mount -o remount,rw /system;
   chown root.root /system/lib/*.so;
-  chmod 644 /system/lib/*.so;
+  busybox chmod 644 /system/lib/*.so;
   mount -o remount,ro /system;
   rm -rf $gtmp;
 
