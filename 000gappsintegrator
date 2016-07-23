@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# chmod -R 755 /system/etc/init.d /system/su.d
+# chmod -R 755 /system/etc/init.d /system/su.d /su/su.d
 #
 # ROM GApps Auto-Integration
 # osm0sis @ xda-developers
@@ -78,10 +78,16 @@ done;
 test "$nozipbins" && logbuff echo -ne "\n\x20* -- using fallback method instead";
 
 # get SDK version to perform different actions due to /data/app layout changes 
-sdkver=`getprop ro.build.version.sdk`;
+sdkver=`grep "ro.build.version.sdk" /system/build.prop | cut -d\= -f2`;
+
+# abort if failed to get SDK version
+if [ ! "$sdkver" ]; then
+   abort=1;
+   logbuff echo -ne "\n\x20* -- SDK version unknown";
+fi;
 
 # find new unintegrated Google Apps APKs in /data
-for i in $(ls /data/app/ | grep -E '^com.android|^com.google.android|^com.chrome'); do
+for i in $(ls /data/app/ | grep -E '^com.android|^com.google.android|^com.google.earth|^com.chrome|^com.motorola'); do
 
   # skip all if script environment is broken
   test "$abort" && break;
