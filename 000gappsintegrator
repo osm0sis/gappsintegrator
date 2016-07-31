@@ -252,14 +252,23 @@ for i in $(ls /data/app/ | grep -E '^com.android|^com.google.android|^com.google
           busybox chmod -R 755 $sysapk/lib $sysapk/oat;
           busybox chmod 644 $sysapk/$sysname.apk $sysapk/lib/*/* $sysapk/oat/*/*;
 
-          # flag APKs that cause breakage after integration for workaround during cleanup
-          case $package in
-            com.google.android.calendar|com.google.android.inputmethod.*|com.google.android.tts|com.google.android.webview)
-              touch /data/app/$i/forcerebuild;;
-          esac;
-
           # flag for cleanup on reboot following optimization
           touch /data/app/$i/integrated;
+ 
+          # workaround for APKs that cause breakage after integration by removing runtime-permissions.xml to force rebuild
+          case $package in
+            com.google.android.calendar|com.google.android.inputmethod.*|com.google.android.tts|com.google.android.webview|com.google.android.play.games)
+            logbuff echo -ne "\x20~";
+            # Don't do this if files already copied previously
+            if [ ! -f /data/local/tmp/permrebuild ]; then
+              for i in $(ls /data/system/users/*/runtime-permissions.xml); do
+                usernum=`echo "$i" | cut -d\/ -f5`;
+                cp $i "/data/local/tmp/$usernum-runtimeperms";
+              done;
+              rm -f /data/system/users/*/runtime-permissions.xml;
+              touch /data/local/tmp/permrebuild;
+            fi;
+          esac;
 
         fi;
         # remove packages.xml entry for /data APK and ensure proper ownership/permissions
@@ -277,12 +286,6 @@ for i in $(ls /data/app/ | grep -E '^com.android|^com.google.android|^com.google
 
     fi;
   elif [ -f /data/app/$i/integrated ]; then
-
-    # if necessary force a rebuild of permissions lists
-    if [ -f /data/app/$i/forcerebuild ]; then
-      rm -f /data/system/users/*/runtime-permissions.xml;
-      logbuff echo -ne "\x20~";
-    fi;
 
     # clean up to mimic pre-Lollipop (AOSP) behavior
     rm -rf /data/app/$package-*;
@@ -317,3 +320,25 @@ echo -e "$logbuff\n" >> $log;
 # limit log length to ~16Kb (when exceeded) by removing oldest entry
 test "$(du -k $log | cut -f1)" -gt 16 && $bb sed -i "/$(grep -m1 -vE '^$|^#.*$' $log)/,/^\s*$/d" $log;
 
+# restore runtime-permissions.xml files and reboot after boot is completed if needed
+counter4=0;
+if [ -f /data/local/tmp/permrebuild ]; then
+  until [ "$(getprop sys.boot_completed)" == 1 -o "$counter4" -gt "$sdlimit" ]; do
+    sleep 1;
+    counter4=$((counter4 + 1));
+  done;
+  if [ "$counter2" -gt "$sdlimit" ]; then
+    echo "Ooops! Timeout for boot completion to restore runtime-permissions files" >> $log;
+    echo "\n---\n" >> $log;
+  fi;
+  for i in $(ls /data/local/tmp/*-runtimeperms); do
+    usernum=`echo "$i" | cut -d\/ -f5 | cut -d\- -f1`;
+    cp "/data/local/tmp/$usernum-runtimeperms" "/data/system/users/$usernum/runtime-permissions.xml";
+    chown system:system "/data/system/users/$usernum/runtime-permissions.xml";
+  done;
+  rm -f /data/local/tmp/*-runtimeperms;
+  rm -f /data/local/tmp/permrebuild;
+  echo "Rebooting after restoring runtime-permissions.xml files" >> $log;
+  echo "---\n" >> $log;
+  reboot;
+fi;
