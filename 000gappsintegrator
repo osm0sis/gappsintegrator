@@ -258,16 +258,16 @@ for i in $(ls /data/app/ | grep -E '^com.android|^com.google.android|^com.google
           # workaround for APKs that cause breakage after integration by removing runtime-permissions.xml to force rebuild
           case $package in
             com.google.android.calendar|com.google.android.inputmethod.*|com.google.android.tts|com.google.android.webview|com.google.android.play.games)
-		    logbuff echo -ne "\x20~";
-			# Don't do this if files already copied previously
-		    if [ ! -f /data/local/tmp/permrebuild ]; then
-	    	  for i in $(ls /data/system/users/*/runtime-permissions.xml); do
+            logbuff echo -ne "\x20~";
+            # Don't do this if files already copied previously
+            if [ ! -f /data/local/tmp/permrebuild ]; then
+              for i in $(ls /data/system/users/*/runtime-permissions.xml); do
                 usernum=`echo "$i" | cut -d\/ -f5`;
                 cp $i "/data/local/tmp/$usernum-runtimeperms";
               done;
-			  rm -f /data/system/users/*/runtime-permissions.xml;
-			  touch /data/local/tmp/permrebuild;
-			fi;
+              rm -f /data/system/users/*/runtime-permissions.xml;
+              touch /data/local/tmp/permrebuild;
+            fi;
           esac;
 
         fi;
@@ -327,14 +327,14 @@ if [ -f /data/local/tmp/permrebuild ]; then
     sleep 1;
     counter4=$((counter4 + 1));
   done;
-  if [ "$counter2" -gt "$syslimit" ]; then
+  if [ "$counter2" -gt "$sdlimit" ]; then
     echo "Ooops! Timeout for boot completion to restore runtime-permissions files" >> $log;
-	echo "\n---\n" >> $log;
+    echo "\n---\n" >> $log;
   fi;
   for i in $(ls /data/local/tmp/*-runtimeperms); do
     usernum=`echo "$i" | cut -d\/ -f5 | cut -d\- -f1`;
     cp "/data/local/tmp/$usernum-runtimeperms" "/data/system/users/$usernum/runtime-permissions.xml";
-	chown system:system "/data/system/users/$usernum/runtime-permissions.xml";
+    chown system:system "/data/system/users/$usernum/runtime-permissions.xml";
   done;
   rm -f /data/local/tmp/*-runtimeperms;
   rm -f /data/local/tmp/permrebuild;
