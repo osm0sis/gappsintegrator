@@ -345,7 +345,7 @@ if [ -f /data/local/tmp/permrebuild ]; then
     sleep 1;
     counter4=$((counter4 + 1));
   done;
-  if [ "$counter2" -gt "$sdlimit" ]; then
+  if [ "$counter4" -gt "$sdlimit" ]; then
     echo "Ooops! Timeout for boot completion to restore runtime-permissions files" >> $log;
     echo "\n---\n" >> $log;
   fi;
