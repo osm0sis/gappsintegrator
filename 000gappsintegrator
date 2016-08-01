@@ -1,0 +1,357 @@
+#!/system/bin/sh
+# chmod -R 755 /system/etc/init.d /system/su.d /su/su.d
+#
+# ROM GApps Auto-Integration
+# osm0sis @ xda-developers
+
+logbuff() { logbuff+="$($*)"; }
+writable() { touch $1/tmpfile 2>/dev/null; ret=$?; rm $1/tmpfile 2>/dev/null; echo $ret; }
+
+# figure out if the next integration will likely have enough free space in /system
+freespace() {
+  free=$(df -Ph /system 2>/dev/null | tail -n 1 | awk '{ print $4 }');
+  case $free in *K) free=0;; *M) free=`echo $free | cut -dM -f1 | cut -d. -f1`;; *G) free=$((`echo $free | cut -dG -f1 | cut -d. -f1` * 1024));; esac;
+  libsize=0; buffer=5;
+  if [ "$nozipbins" ]; then
+    for entry in $(unzip -l $1 lib/* 2>/dev/null | tail -n +4 | awk '{ print $1 }'); do
+      test $entry != "--------" && libsize=$((libsize + entry)) || break;
+    done;
+    test $libsize -lt 1048576 && libsize=1 || libsize=$((libsize / 1048576));
+  else
+    buffer=10;
+  fi;
+  datapksize=$(du -m $1 | awk '{ print $1 }');
+  sysapksize=$(du -m $2 | awk '{ print $1 }');
+  need=$((datapksize + libsize - sysapksize + buffer));
+  test $free -gt $need; echo $?;
+}
+
+# loop counter timeout limits for device writability, limit number of apps to process
+sdlimit=600; syslimit=120; applimit=2;
+
+# create log/change filedate immediately to indicate script is active once /sdcard is available
+log=/sdcard/gapps-integrator.log;
+counter1=0;
+until [ "$(writable /sdcard; touch $log)" == 0 -o "$counter1" -gt "$sdlimit" ]; do
+  sleep 1;
+  counter1=$((counter1 + 1));
+done&
+
+# wait for /system to become remountable/writable, abort if it does not
+counter2=0;
+until [ "$(mount -o remount,rw /system >/dev/null; writable /system; mount -o remount,ro /system >/dev/null)" == 0 -o "$counter2" -gt "$syslimit" ]; do
+  sleep 1;
+  counter2=$((counter2 + 1));
+done;
+if [ "$counter2" -gt "$syslimit" ]; then
+  logbuff echo -ne "\n\x20* Fatal error: /system did not become remountable/writable during boot";
+  abort=1;
+fi;
+
+logbuff echo -n `date`;
+gtmp=/data/local/tmp/gapp;
+
+# test for and try to ensure a working basic script environment, often broken in Marshmallow (AOSP)
+for i in awk sed tail unzip which; do
+  if [ ! "$(which $i)" ]; then
+    logbuff echo -ne "\n\x20* Missing script environment element detected: $i";
+    abort=1;
+  fi;
+done;
+if [ ! "$(echo testing | sed 's/test/pass/')" == "passing" ]; then
+  logbuff echo -ne "\n\x20* Broken script environment element detected: sed";
+  if [ "$(echo testing | busybox sed 's/test/pass/')" == "passing" ]; then
+    logbuff echo -ne "\n\x20* -- using busybox sed instead";
+    bb=busybox;
+  else
+    abort=1;
+  fi;
+fi;
+
+# check for zip and zipalign binaries to determine integration method
+for i in zip zipalign; do
+  if [ ! "$(which $i)" ]; then
+    logbuff echo -ne "\n\x20* Missing binary for primary integration method: $i";
+    nozipbins=1;
+  fi;
+done;
+test "$nozipbins" && logbuff echo -ne "\n\x20* -- using fallback method instead";
+
+# get SDK version to perform different actions due to /data/app layout changes 
+sdkver=`grep "ro.build.version.sdk" /system/build.prop | cut -d\= -f2`;
+
+# abort if failed to get SDK version
+if [ ! "$sdkver" ]; then
+   abort=1;
+   logbuff echo -ne "\n\x20* -- SDK version unknown";
+fi;
+
+# find new unintegrated Google Apps APKs in /data
+appcounter=0;
+for i in $(ls /data/app/ | grep -E '^com.android|^com.google.android|^com.google.earth|^com.chrome|^com.motorola'); do
+
+  # skip all if script environment is broken
+  test "$abort" && break;
+  
+  # skip if applimit exceeded for this session
+  if [ "$appcounter" -ge "$applimit" ]; then
+    continue;
+  fi;
+
+
+  # find equivalent /system APK name and only process if it exists
+  xml=/data/system/packages.xml;
+  package=`echo $i | rev | cut -d- -f2- | rev`;
+  sysapk=`grep "updated-package name=\"$package\"" $xml | grep -o 'codePath=.*$' | cut -d\" -f2`;
+
+  logbuff echo -ne "\n/data/app/$i $sysapk";
+
+  if [ "$sysapk" ]; then
+
+    # compare /data and /system APK versions and only integrate if /data is newer (necessary on Lollipop and above)
+    datver=$(grep "codePath=\"/data/app/$i\"" $xml | grep -o 'version=.*$' | cut -d\" -f2);
+    sysver=$(grep "codePath=\"$sysapk\"" $xml | grep -o 'version=.*$' | cut -d\" -f2);
+
+    if [ "$datver" -gt "$sysver" ]; then
+    
+      appcounter=$((appcounter + 1));
+
+      logbuff echo -ne "\x20($datver > $sysver)";
+      mkdir -p $gtmp;
+
+      # KitKat (and below) support
+      if [ "$sdkver" -le 20 ]; then
+        datapk=/data/app/$i;
+
+        # exclude APKs that cause breakage after integration
+        case $package in
+          com.google.android.apps.messaging|com.google.android.apps.photos|com.google.android.apps.plus|com.google.android.street|com.google.android.talk|com.google.android.youtube)
+            logbuff echo -ne "\x20!";
+            continue;;
+        esac;
+
+        # skip current APK if it fails a free space check
+        if [ "$(freespace $datapk $sysapk)" != 0 ]; then
+          logbuff echo -ne "\x20*";
+          continue;
+        fi;
+
+        # remove libraries from copied APK and zipalign if the binaries exist
+        if [ ! "$nozipbins" ]; then
+          cp -fp $datapk $gtmp/preopt-$i;
+          zip -d $gtmp/preopt-$i lib/*/*;
+          zipalign 4 $gtmp/preopt-$i $gtmp/$i;
+          datapk=$gtmp/$i;
+        fi;
+
+        # extract and force copy libraries to /system
+        unzip /data/app/$i -d $gtmp lib/*;
+        busybox chmod 644 $gtmp/lib/*/*;
+        mount -o remount,rw /system;
+        rm -f $sysapk;
+        cp -fp $gtmp/lib/*/* /system/lib/;
+
+        # overwrite /system APK with new /data APK then fix permissions
+        cp -f $datapk $sysapk;
+        chown root.root $sysapk;
+        busybox chmod 644 $sysapk;
+
+      # Lollipop support
+      elif [ "$sdkver" -le 22 ]; then
+        datapk=/data/app/$i/base.apk;
+        sysname=`basename $sysapk`;
+
+        # save time on boots after APK work has been completed but apps are awaiting optimization
+        if [ ! -f /data/app/$i/integrated ]; then
+
+          # skip current APK if it fails a free space check
+          if [ "$(freespace $datapk $sysapk/$sysname.apk)" != 0 ]; then
+            logbuff echo -ne "\x20*";
+            continue;
+          fi;
+
+          # remove libraries from copied APK and zipalign if the binaries exist
+          if [ ! "$nozipbins" ]; then
+
+            # workaround for Chrome not playing by the usual rules (per usual)
+            case $package in
+              com.android.chrome|com.chrome.*)
+                mount -o remount,rw /system;
+                rm -f $sysapk/lib/*/libchrome.so;;
+              *)
+
+                cp -fp $datapk $gtmp/preopt-$i.apk;
+                zip -d $gtmp/preopt-$i.apk lib/*/*;
+                zipalign 4 $gtmp/preopt-$i.apk $gtmp/$i.apk;
+                datapk=$gtmp/$i.apk;;
+
+            esac;
+          fi;
+
+          # force copy libraries to /system respecting symlinks then clean up empty files
+          mount -o remount,rw /system;
+          rm -f $sysapk/$sysname.apk;
+          cp -RLf /data/app/$i/lib $sysapk;
+          for j in `ls $sysapk/lib/*/*`; do
+            test ! -s $j && rm -f $j;
+          done;
+
+          # overwrite /system APK with new /data APK then fix permissions
+          cp -fp $datapk $sysapk/$sysname.apk;
+          chown -R root.root $sysapk;
+          busybox chmod -R 755 $sysapk/lib;
+          busybox chmod 644 $sysapk/$sysname.apk $sysapk/lib/*/*;
+
+          # flag for cleanup on reboot following optimization
+          touch /data/app/$i/integrated;
+
+        fi;
+        # remove packages.xml entry for /data APK and ensure proper ownership/permissions
+        $bb sed -i "/<updated-package name=\"${package}\"/,/<\/updated-package>/d" $xml;
+        chown system:system $xml;
+        busybox chmod 660 $xml;
+
+      # Marshmallow (and above) support
+      elif [ "$sdkver" -ge 23 ]; then
+        datapk=/data/app/$i/base.apk;
+        sysname=`basename $sysapk`;
+
+        # save time on boots after APK work has been completed but apps are awaiting optimization
+        if [ ! -f /data/app/$i/integrated ]; then
+
+          # skip current APK if it fails a free space check
+          if [ "$(freespace $datapk $sysapk/$sysname.apk)" != 0 ]; then
+            logbuff echo -ne "\x20*";
+            continue;
+          fi;
+
+          # decompress libraries within copied APK and zipalign if the binaries exist (maintains proper Marshmallow and above structure)
+          if [ ! "$nozipbins" ]; then
+            unzip $datapk -d $gtmp lib/*;
+            cp -fp $datapk $gtmp/preopt-$i.apk;
+            zip -d $gtmp/preopt-$i.apk lib/*/*;
+            cd $gtmp;
+            zip -r -0 -D $gtmp/preopt-$i.apk lib/;
+            zipalign -p 4 $gtmp/preopt-$i.apk $gtmp/$i.apk;
+            datapk=$gtmp/$i.apk;
+
+          else
+            # otherwise force copy libraries to /system respecting symlinks then clean up empty files
+            if [ -e /data/app/$i/lib/* ]; then
+              mount -o remount,rw /system;
+              rm -f $sysapk/$sysname.apk;
+              cp -RLf /data/app/$i/lib $sysapk;
+              for j in `ls $sysapk/lib/*/*`; do
+                test ! -s $j && rm -f $j;
+              done;
+            fi;
+
+          fi;
+          # if necessary force copy APK odex file to /system
+          mount -o remount,rw /system;
+          if [ -d $sysapk/oat ]; then
+            cp -fp /data/app/$i/oat $sysapk;
+            cd $sysapk/oat/*/;
+            mv base.odex $sysname.odex;
+          fi;
+
+          # overwrite /system APK with new /data APK then fix permissions
+          cp -fp $datapk $sysapk/$sysname.apk;
+          chown -R root.root $sysapk;
+          busybox chmod -R 755 $sysapk/lib $sysapk/oat;
+          busybox chmod 644 $sysapk/$sysname.apk $sysapk/lib/*/* $sysapk/oat/*/*;
+
+          # flag for cleanup on reboot following optimization
+          touch /data/app/$i/integrated;
+ 
+        fi;
+
+        # remove packages.xml entry for /data APK and ensure proper ownership/permissions
+        $bb sed -i "/<updated-package name=\"${package}\"/,/<\/updated-package>/d" $xml;
+        chown system:system $xml;
+        busybox chmod 660 $xml;
+        
+        # workaround for APKs that cause breakage after integration by removing runtime-permissions.xml to force rebuild
+        case $package in
+          com.google.android.calendar|com.google.android.inputmethod.*|com.google.android.tts|com.google.android.webview|com.google.android.play.games)
+          logbuff echo -ne "\x20~";
+          # Don't do this if files already copied previously
+          if [ ! -f /data/local/tmp/permrebuild ]; then
+            for i in $(ls /data/system/users/*/runtime-permissions.xml); do
+              usernum=`echo "$i" | cut -d\/ -f5`;
+              cp $i "/data/local/tmp/$usernum-runtimeperms";
+            done;
+            rm -f /data/system/users/*/runtime-permissions.xml;
+            touch /data/local/tmp/permrebuild;
+          fi;
+        esac;
+
+        # Go ahead and delete /data/app copy instead of waiting for reboot
+        rm -rf /data/app/$i
+        
+      fi;
+      mount -o remount,ro /system;
+      rm -rf $gtmp;
+
+    else
+      # clean up any duplicate packages that are not the current active copy
+      rm -rf /data/app/$i;
+
+    fi;
+  elif [ -f /data/app/$i/integrated ]; then
+
+    # clean up to mimic pre-Lollipop (AOSP) behavior
+    rm -rf /data/app/$package-*;
+
+  fi;
+done;
+
+# global cleanups required on Lollipop (and above)
+if [ "$sdkver" -ge 21 ]; then
+
+  # fix /system/lib permissions to ensure libs copied via symlink are correct
+  mount -o remount,rw /system;
+  chown root.root /system/lib/*.so;
+  busybox chmod 644 /system/lib/*.so;
+  mount -o remount,ro /system;
+  rm -rf $gtmp;
+
+fi;
+
+logbuff echo -e "\n---";
+
+# write buffered log once /sdcard is available, fallback to a known working location if this fails
+counter3=0;
+until [ "$(writable /sdcard)" == 0 -o "$counter3" -gt "$sdlimit" ]; do
+  sleep 1;
+  counter3=$((counter3 + 1));
+done;
+test "$counter3" -gt "$sdlimit" && log=/data/local/gapps-integrator.log;
+test ! -s $log && echo -e "## GApps Auto-Integration Script Log\n#\n# ~ = forced permissions list rebuild,\n# * = not enough free space, ! = excluded\n" > $log;
+echo -e "$logbuff\n" >> $log;
+
+# limit log length to ~16Kb (when exceeded) by removing oldest entry
+test "$(du -k $log | cut -f1)" -gt 16 && $bb sed -i "/$(grep -m1 -vE '^$|^#.*$' $log)/,/^\s*$/d" $log;
+
+# restore runtime-permissions.xml files and reboot after boot is completed if needed
+counter4=0;
+if [ -f /data/local/tmp/permrebuild ]; then
+  until [ "$(getprop sys.boot_completed)" == 1 -o "$counter4" -gt "$sdlimit" ]; do
+    sleep 1;
+    counter4=$((counter4 + 1));
+  done;
+  if [ "$counter2" -gt "$sdlimit" ]; then
+    echo "Ooops! Timeout for boot completion to restore runtime-permissions files" >> $log;
+    echo "\n---\n" >> $log;
+  fi;
+  for i in $(ls /data/local/tmp/*-runtimeperms); do
+    usernum=`echo "$i" | cut -d\/ -f5 | cut -d\- -f1`;
+    cp "/data/local/tmp/$usernum-runtimeperms" "/data/system/users/$usernum/runtime-permissions.xml";
+    chown system:system "/data/system/users/$usernum/runtime-permissions.xml";
+  done;
+  rm -f /data/local/tmp/*-runtimeperms;
+  rm -f /data/local/tmp/permrebuild;
+  echo "Rebooting after restoring runtime-permissions.xml files" >> $log;
+  echo "---\n" >> $log;
+  reboot;
+fi;
