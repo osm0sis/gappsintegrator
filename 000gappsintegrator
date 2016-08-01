@@ -267,7 +267,12 @@ for i in $(ls /data/app/ | grep -E '^com.android|^com.google.android|^com.google
         fi;
 
         # remove packages.xml entry for /data APK and ensure proper ownership/permissions
-        $bb sed -i "/<updated-package name=\"${package}\"/,/<\/updated-package>/d" $xml;
+        # for single line updated-package entries remove just the one line
+        if [ "$(grep "\<updated-package name=\"${package}\"" $xml | grep "\/\>")" ]; then
+          $bb sed -i "/<updated-package name=\"${package}\"/d" $xml;
+        else
+          $bb sed -i "/<updated-package name=\"${package}\"/,/<\/updated-package>/d" $xml;
+        fi;
         chown system:system $xml;
         busybox chmod 660 $xml;
         
