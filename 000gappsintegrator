@@ -27,7 +27,7 @@ freespace() {
 }
 
 # loop counter timeout limits for device writability, limit number of apps to process
-sdlimit=600; syslimit=120; applimit=2;
+sdlimit=600; syslimit=120; applimit=4;
 
 # create log/change filedate immediately to indicate script is active once /sdcard is available
 log=/sdcard/gapps-integrator.log;
@@ -48,7 +48,6 @@ if [ "$counter2" -gt "$syslimit" ]; then
   abort=1;
 fi;
 
-logbuff echo -n `date`;
 gtmp=/data/local/tmp/gapp;
 
 # test for and try to ensure a working basic script environment, often broken in Marshmallow (AOSP)
@@ -333,6 +332,7 @@ until [ "$(writable /sdcard)" == 0 -o "$counter3" -gt "$sdlimit" ]; do
 done;
 test "$counter3" -gt "$sdlimit" && log=/data/local/gapps-integrator.log;
 test ! -s $log && echo -e "## GApps Auto-Integration Script Log\n#\n# ~ = forced permissions list rebuild,\n# * = not enough free space, ! = excluded\n" > $log;
+echo -n `date` >> $log;
 echo -e "$logbuff\n" >> $log;
 
 # limit log length to ~16Kb (when exceeded) by removing oldest entry
