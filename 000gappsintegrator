@@ -26,8 +26,8 @@ freespace() {
   test $free -gt $need; echo $?;
 }
 
-# loop counter timeout limits for device writability
-sdlimit=600; syslimit=120;
+# loop counter timeout limits for device writability, limit number of apps to process
+sdlimit=600; syslimit=120; applimit=4;
 
 # create log/change filedate immediately to indicate script is active once /sdcard is available
 log=/sdcard/gapps-integrator.log;
@@ -48,7 +48,6 @@ if [ "$counter2" -gt "$syslimit" ]; then
   abort=1;
 fi;
 
-logbuff echo -n `date`;
 gtmp=/data/local/tmp/gapp;
 
 # test for and try to ensure a working basic script environment, often broken in Marshmallow (AOSP)
@@ -87,10 +86,17 @@ if [ ! "$sdkver" ]; then
 fi;
 
 # find new unintegrated Google Apps APKs in /data
+appcounter=0;
 for i in $(ls /data/app/ | grep -E '^com.android|^com.google.android|^com.google.earth|^com.chrome|^com.motorola'); do
 
   # skip all if script environment is broken
   test "$abort" && break;
+  
+  # skip if applimit exceeded for this session
+  if [ "$appcounter" -ge "$applimit" ]; then
+    continue;
+  fi;
+
 
   # find equivalent /system APK name and only process if it exists
   xml=/data/system/packages.xml;
@@ -106,6 +112,8 @@ for i in $(ls /data/app/ | grep -E '^com.android|^com.google.android|^com.google
     sysver=$(grep "codePath=\"$sysapk\"" $xml | grep -o 'version=.*$' | cut -d\" -f2);
 
     if [ "$datver" -gt "$sysver" ]; then
+    
+      appcounter=$((appcounter + 1));
 
       logbuff echo -ne "\x20($datver > $sysver)";
       mkdir -p $gtmp;
@@ -254,8 +262,9 @@ for i in $(ls /data/app/ | grep -E '^com.android|^com.google.android|^com.google
 
           # flag for cleanup on reboot following optimization
           touch /data/app/$i/integrated;
-
+ 
         fi;
+
         # remove packages.xml entry for /data APK and ensure proper ownership/permissions
         # for single line updated-package entries remove just the one line
         if [ "$(grep "\<updated-package name=\"${package}\"" $xml | grep "\/\>")" ]; then
@@ -281,6 +290,9 @@ for i in $(ls /data/app/ | grep -E '^com.android|^com.google.android|^com.google
           fi;
         esac;
 
+        # Go ahead and delete /data/app copy instead of waiting for reboot
+        rm -rf /data/app/$i
+        
       fi;
       mount -o remount,ro /system;
       rm -rf $gtmp;
@@ -320,6 +332,7 @@ until [ "$(writable /sdcard)" == 0 -o "$counter3" -gt "$sdlimit" ]; do
 done;
 test "$counter3" -gt "$sdlimit" && log=/data/local/gapps-integrator.log;
 test ! -s $log && echo -e "## GApps Auto-Integration Script Log\n#\n# ~ = forced permissions list rebuild,\n# * = not enough free space, ! = excluded\n" > $log;
+echo -n `date` >> $log;
 echo -e "$logbuff\n" >> $log;
 
 # limit log length to ~16Kb (when exceeded) by removing oldest entry
