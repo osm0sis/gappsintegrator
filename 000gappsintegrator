@@ -27,10 +27,14 @@ freespace() {
 }
 
 # loop counter timeout limits for device writability
-sdlimit=600; syslimit=120;
+sdlimit=900; syslimit=120;
+
+# define working paths
+gtmp=/data/local/tmp/gapp;
+gbak=/data/local/tmp/gxml-bak;
+log=/sdcard/gapps-integrator.log;
 
 # create log/change filedate immediately to indicate script is active once /sdcard is available
-log=/sdcard/gapps-integrator.log;
 counter1=0;
 until [ "$(writable /sdcard; touch $log)" == 0 -o "$counter1" -gt "$sdlimit" ]; do
   sleep 1;
@@ -48,11 +52,14 @@ if [ "$counter2" -gt "$syslimit" ]; then
   abort=1;
 fi;
 
+# log earliest accurate processing start timestamp once date stops returning epoch in early boot
+until [ ! "$(date | grep '1970')" ]; do
+  sleep 1;
+done;
 logbuff echo -n `date`;
-gtmp=/data/local/tmp/gapp;
 
 # test for and try to ensure a working basic script environment, often broken in Marshmallow (AOSP)
-for i in awk sed tail unzip which; do
+for i in awk basename cut dirname sed tail unzip which; do
   if [ ! "$(which $i)" ]; then
     logbuff echo -ne "\n\x20* Missing script environment element detected: $i";
     abort=1;
@@ -67,6 +74,17 @@ if [ ! "$(echo testing | sed 's/test/pass/')" == "passing" ]; then
     abort=1;
   fi;
 fi;
+touch /data/local/testfile1; touch /data/local/testfile2;
+if [ ! "$(chmod 666 /data/local/testfile*; echo $?)" == 0 ]; then
+  logbuff echo -ne "\n\x20* Broken script environment element detected: chmod";
+  if [ "$(busybox chmod 666 /data/local/testfile*; echo $?)" == 0 ]; then
+    logbuff echo -ne "\n\x20* -- using busybox chmod instead";
+    bb=busybox;
+  else
+    abort=1;
+  fi;
+fi;
+rm -f /data/local/testfile*;
 
 # check for zip and zipalign binaries to determine integration method
 for i in zip zipalign; do
@@ -77,17 +95,12 @@ for i in zip zipalign; do
 done;
 test "$nozipbins" && logbuff echo -ne "\n\x20* -- using fallback method instead";
 
-# get SDK version to perform different actions due to /data/app layout changes 
-sdkver=`grep "ro.build.version.sdk" /system/build.prop | cut -d\= -f2`;
-
-# abort if failed to get SDK version
-if [ ! "$sdkver" ]; then
-   abort=1;
-   logbuff echo -ne "\n\x20* -- SDK version unknown";
-fi;
+# get SDK version to perform different actions due to /data/app layout changes
+sdkver=`getprop ro.build.version.sdk`;
+test ! "$sdkver" && sdkver=`grep '^ro.build.version.sdk' /system/build.prop | cut -d= -f2`;
 
 # find new unintegrated Google Apps APKs in /data
-for i in $(ls /data/app/ | grep -E '^com.android|^com.google.android|^com.google.earth|^com.chrome|^com.motorola'); do
+for i in $(ls /data/app/ | grep -E '^com.android|^com.chrome|^com.google.android|^com.google.earth|^com.motorola'); do
 
   # skip all if script environment is broken
   test "$abort" && break;
@@ -137,7 +150,7 @@ for i in $(ls /data/app/ | grep -E '^com.android|^com.google.android|^com.google
 
         # extract and force copy libraries to /system
         unzip /data/app/$i -d $gtmp lib/*;
-        busybox chmod 644 $gtmp/lib/*/*;
+        $bb chmod 644 $gtmp/lib/*/*;
         mount -o remount,rw /system;
         rm -f $sysapk;
         cp -fp $gtmp/lib/*/* /system/lib/;
@@ -145,7 +158,7 @@ for i in $(ls /data/app/ | grep -E '^com.android|^com.google.android|^com.google
         # overwrite /system APK with new /data APK then fix permissions
         cp -f $datapk $sysapk;
         chown root.root $sysapk;
-        busybox chmod 644 $sysapk;
+        $bb chmod 644 $sysapk;
 
       # Lollipop support
       elif [ "$sdkver" -le 22 ]; then
@@ -190,17 +203,21 @@ for i in $(ls /data/app/ | grep -E '^com.android|^com.google.android|^com.google
           # overwrite /system APK with new /data APK then fix permissions
           cp -fp $datapk $sysapk/$sysname.apk;
           chown -R root.root $sysapk;
-          busybox chmod -R 755 $sysapk/lib;
-          busybox chmod 644 $sysapk/$sysname.apk $sysapk/lib/*/*;
+          $bb chmod -R 755 $sysapk/lib;
+          $bb chmod 644 $sysapk/$sysname.apk $sysapk/lib/*/*;
 
           # flag for cleanup on reboot following optimization
           touch /data/app/$i/integrated;
 
         fi;
         # remove packages.xml entry for /data APK and ensure proper ownership/permissions
-        $bb sed -i "/<updated-package name=\"${package}\"/,/<\/updated-package>/d" $xml;
+        if [ "$(grep "<updated-package name=\"${package}\"" $xml | grep '/>')" ]; then
+          $bb sed -i "/<updated-package name=\"${package}\"/d" $xml;
+        else
+          $bb sed -i "/<updated-package name=\"${package}\"/,/<\/updated-package>/d" $xml;
+        fi;
         chown system:system $xml;
-        busybox chmod 660 $xml;
+        $bb chmod 660 $xml;
 
       # Marshmallow (and above) support
       elif [ "$sdkver" -ge 23 ]; then
@@ -249,36 +266,34 @@ for i in $(ls /data/app/ | grep -E '^com.android|^com.google.android|^com.google
           # overwrite /system APK with new /data APK then fix permissions
           cp -fp $datapk $sysapk/$sysname.apk;
           chown -R root.root $sysapk;
-          busybox chmod -R 755 $sysapk/lib $sysapk/oat;
-          busybox chmod 644 $sysapk/$sysname.apk $sysapk/lib/*/* $sysapk/oat/*/*;
+          $bb chmod -R 755 $sysapk/lib $sysapk/oat;
+          $bb chmod 644 $sysapk/$sysname.apk $sysapk/lib/*/* $sysapk/oat/*/*;
 
           # flag for cleanup on reboot following optimization
           touch /data/app/$i/integrated;
 
         fi;
         # remove packages.xml entry for /data APK and ensure proper ownership/permissions
-        # for single line updated-package entries remove just the one line
-        if [ "$(grep "\<updated-package name=\"${package}\"" $xml | grep "\/\>")" ]; then
+        if [ "$(grep "<updated-package name=\"${package}\"" $xml | grep '/>')" ]; then
           $bb sed -i "/<updated-package name=\"${package}\"/d" $xml;
         else
           $bb sed -i "/<updated-package name=\"${package}\"/,/<\/updated-package>/d" $xml;
         fi;
         chown system:system $xml;
-        busybox chmod 660 $xml;
+        $bb chmod 660 $xml;
         
-        # workaround for APKs that cause breakage after integration by removing runtime-permissions.xml to force rebuild
+        # workaround for APKs that cause breakage after integration by temporarily removing runtime-permissions.xml to force rebuild
         case $package in
-          com.google.android.calendar|com.google.android.inputmethod.*|com.google.android.tts|com.google.android.webview|com.google.android.play.games)
-          logbuff echo -ne "\x20~";
-          # Don't do this if files already copied previously
-          if [ ! -f /data/local/tmp/permrebuild ]; then
-            for i in $(ls /data/system/users/*/runtime-permissions.xml); do
-              usernum=`echo "$i" | cut -d\/ -f5`;
-              cp $i "/data/local/tmp/$usernum-runtimeperms";
-            done;
-            rm -f /data/system/users/*/runtime-permissions.xml;
-            touch /data/local/tmp/permrebuild;
-          fi;
+          com.google.android.calendar|com.google.android.inputmethod.*|com.google.android.play.games|com.google.android.tts|com.google.android.webview)
+            logbuff echo -ne "\x20~";
+            if [ ! -d $gbak ]; then
+              mkdir -p $gbak;
+              for rtperm in /data/system/users/*/runtime-permissions.xml; do
+                user=`basename $(dirname $rtperm)`;
+                cp -fp $rtperm $gbak/$user;
+              done;
+              rm -f $rtperm;
+            fi;;
         esac;
 
       fi;
@@ -304,13 +319,11 @@ if [ "$sdkver" -ge 21 ]; then
   # fix /system/lib permissions to ensure libs copied via symlink are correct
   mount -o remount,rw /system;
   chown root.root /system/lib/*.so;
-  busybox chmod 644 /system/lib/*.so;
+  $bb chmod 644 /system/lib/*.so;
   mount -o remount,ro /system;
   rm -rf $gtmp;
 
 fi;
-
-logbuff echo -e "\n---";
 
 # write buffered log once /sdcard is available, fallback to a known working location if this fails
 counter3=0;
@@ -320,30 +333,30 @@ until [ "$(writable /sdcard)" == 0 -o "$counter3" -gt "$sdlimit" ]; do
 done;
 test "$counter3" -gt "$sdlimit" && log=/data/local/gapps-integrator.log;
 test ! -s $log && echo -e "## GApps Auto-Integration Script Log\n#\n# ~ = forced permissions list rebuild,\n# * = not enough free space, ! = excluded\n" > $log;
-echo -e "$logbuff\n" >> $log;
+echo "$logbuff" >> $log;
+echo "---" >> $log;
 
 # limit log length to ~16Kb (when exceeded) by removing oldest entry
 test "$(du -k $log | cut -f1)" -gt 16 && $bb sed -i "/$(grep -m1 -vE '^$|^#.*$' $log)/,/^\s*$/d" $log;
 
-# restore runtime-permissions.xml files and reboot after boot is completed if needed
+# restore runtime-permissions.xml backup files to maintain granted user app permissions and reboot after boot is completed
 counter4=0;
-if [ -f /data/local/tmp/permrebuild ]; then
+if [ -d $gbak ]; then
   until [ "$(getprop sys.boot_completed)" == 1 -o "$counter4" -gt "$sdlimit" ]; do
     sleep 1;
     counter4=$((counter4 + 1));
   done;
   if [ "$counter4" -gt "$sdlimit" ]; then
-    echo "Ooops! Timeout for boot completion to restore runtime-permissions files" >> $log;
-    echo "\n---\n" >> $log;
+    echo "Ooops! Timeout for boot completion to restore user app runtime-permissions files" >> $log;
+    echo "---" >> $log;
   fi;
-  for i in $(ls /data/local/tmp/*-runtimeperms); do
-    usernum=`echo "$i" | cut -d\/ -f5 | cut -d\- -f1`;
-    cp "/data/local/tmp/$usernum-runtimeperms" "/data/system/users/$usernum/runtime-permissions.xml";
-    chown system:system "/data/system/users/$usernum/runtime-permissions.xml";
+  for user in `ls $gbak`; do
+    cp -fp $gbak/$user /data/system/users/$user/runtime-permissions.xml;
   done;
-  rm -f /data/local/tmp/*-runtimeperms;
-  rm -f /data/local/tmp/permrebuild;
-  echo "Rebooting after restoring runtime-permissions.xml files" >> $log;
-  echo "---\n" >> $log;
+  rm -rf $gbak;
+  echo "Rebooting after restoring user app runtime-permissions files" >> $log;
+  echo -e "---\n" >> $log;
   reboot;
 fi;
+echo -ne "\n" >> $log;
+
