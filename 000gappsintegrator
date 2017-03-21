@@ -8,22 +8,31 @@ logbuff() { logbuff+="$($*)"; }
 writable() { touch $1/tmpfile 2>/dev/null; ret=$?; rm $1/tmpfile 2>/dev/null; echo $ret; }
 
 # figure out if the next integration will likely have enough free space in /system
-freespace() {
+freespace-estimate() {
   free=$(df -Ph /system 2>/dev/null | tail -n 1 | awk '{ print $4 }');
   case $free in *K) free=0;; *M) free=`echo $free | cut -dM -f1 | cut -d. -f1`;; *G) free=$((`echo $free | cut -dG -f1 | cut -d. -f1` * 1024));; esac;
-  libsize=0; buffer=5;
+  libsize=0; buffer=4;
   if [ "$nozipbins" ]; then
     for entry in $(unzip -l $1 lib/* 2>/dev/null | tail -n +4 | awk '{ print $1 }'); do
       test $entry != "--------" && libsize=$((libsize + entry)) || break;
     done;
     test $libsize -lt 1048576 && libsize=1 || libsize=$((libsize / 1048576));
   else
-    buffer=10;
+    buffer=8;
   fi;
   datapksize=$(du -m $1 | awk '{ print $1 }');
   sysapksize=$(du -m $2 | awk '{ print $1 }');
   need=$((datapksize + libsize - sysapksize + buffer));
   test $free -gt $need; echo $?;
+}
+
+# determine if final replacement APK and library sizes will fit in /system
+freespace-precise() {
+  free=$(df -Ph /system 2>/dev/null | tail -n 1 | awk '{ print $4 }');
+  case $free in *K) free=0;; *M) free=`echo $free | cut -dM -f1 | cut -d. -f1`;; *G) free=$((`echo $free | cut -dG -f1 | cut -d. -f1` * 1024));; esac;
+  oldfiles=$(du -mc $1 2>/dev/null | tail -n1 | awk '{ print $1 }');
+  newfiles=$(du -mc $2 2>/dev/null | tail -n1 | awk '{ print $1 }');
+  test $((free + oldfiles)) -gt $newfiles; echo $?;
 }
 
 # run in an asynchronous subshell to not impede the boot with su.d
@@ -124,6 +133,7 @@ for i in $(ls /data/app/ | grep -E '^com.android|^com.chrome|^com.google.android
     if [ "$datver" -gt "$sysver" ]; then
 
       logbuff echo -ne "\x20($datver > $sysver)";
+      rm -rf $gtmp;
       mkdir -p $gtmp;
 
       # KitKat (and below) support
@@ -138,7 +148,7 @@ for i in $(ls /data/app/ | grep -E '^com.android|^com.chrome|^com.google.android
         esac;
 
         # skip current APK if it fails a free space check
-        if [ "$(freespace $datapk $sysapk)" != 0 ]; then
+        if [ "$(freespace-estimate $datapk $sysapk)" != 0 ]; then
           logbuff echo -ne "\x20*";
           continue;
         fi;
@@ -151,8 +161,15 @@ for i in $(ls /data/app/ | grep -E '^com.android|^com.chrome|^com.google.android
           datapk=$gtmp/$i;
         fi;
 
-        # extract and force copy libraries to /system
+        # extract and force copy libraries to /system, abort if fails final total space check
         unzip /data/app/$i -d $gtmp lib/*;
+        for j in $(ls $gtmp/lib/*/); do
+          liblist="$liblist /system/lib/$j";
+        done;
+        if [ "$(freespace-precise "$sysapk $liblist" "$datapk $gtmp/lib/*/*" )" != 0 ]; then
+          logbuff echo -ne "\x20**";
+          continue;
+        fi;
         $bb chmod 644 $gtmp/lib/*/*;
         mount -o rw,remount -t auto /system;
         rm -f $sysapk;
@@ -172,7 +189,7 @@ for i in $(ls /data/app/ | grep -E '^com.android|^com.chrome|^com.google.android
         if [ ! -f /data/app/$i/integrated ]; then
 
           # skip current APK if it fails a free space check
-          if [ "$(freespace $datapk $sysapk/$sysname.apk)" != 0 ]; then
+          if [ "$(freespace-estimate $datapk $sysapk/$sysname.apk)" != 0 ]; then
             logbuff echo -ne "\x20*";
             continue;
           fi;
@@ -184,15 +201,23 @@ for i in $(ls /data/app/ | grep -E '^com.android|^com.chrome|^com.google.android
             case $package in
               com.android.chrome|com.chrome.*)
                 mount -o rw,remount -t auto /system;
-                rm -f $sysapk/lib/*/libchrome.so;;
-              *)
+                rm -f $sysapk/lib/*/libchrome.so;
+                mount -o ro,remount -t auto /system;;
 
+              *)
                 cp -fp $datapk $gtmp/preopt-$i.apk;
                 zip -d $gtmp/preopt-$i.apk lib/*/*;
                 zipalign 4 $gtmp/preopt-$i.apk $gtmp/$i.apk;
                 datapk=$gtmp/$i.apk;;
 
             esac;
+
+          fi; # end nozipbins test
+
+          # abort if fails final total space check
+          if [ "$(freespace-precise "$sysapk" "$datapk /data/app/$i/lib" )" != 0 ]; then
+            logbuff echo -ne "\x20**";
+            continue;
           fi;
 
           # force copy libraries to /system respecting symlinks then clean up empty files
@@ -212,7 +237,8 @@ for i in $(ls /data/app/ | grep -E '^com.android|^com.chrome|^com.google.android
           # flag for cleanup on reboot following optimization
           touch /data/app/$i/integrated;
 
-        fi;
+        fi; # end integrated test
+
         # remove packages.xml entry for /data APK and ensure proper ownership/permissions
         if [ "$(grep "<updated-package name=\"${package}\"" $xml | grep '/>')" ]; then
           $bb sed -i "/<updated-package name=\"${package}\"/d" $xml;
@@ -231,7 +257,7 @@ for i in $(ls /data/app/ | grep -E '^com.android|^com.chrome|^com.google.android
         if [ ! -f /data/app/$i/integrated ]; then
 
           # skip current APK if it fails a free space check
-          if [ "$(freespace $datapk $sysapk/$sysname.apk)" != 0 ]; then
+          if [ "$(freespace-estimate $datapk $sysapk/$sysname.apk)" != 0 ]; then
             logbuff echo -ne "\x20*";
             continue;
           fi;
@@ -246,20 +272,35 @@ for i in $(ls /data/app/ | grep -E '^com.android|^com.chrome|^com.google.android
             zipalign -p 4 $gtmp/preopt-$i.apk $gtmp/$i.apk;
             datapk=$gtmp/$i.apk;
 
+            # abort if fails final total space check
+            test -d $sysapk/oat && datoat=/data/app/$i/oat || unset datoat;
+            if [ "$(freespace-precise "$sysapk/$sysname.apk $sysapk/oat $sysapk/lib" "$datapk $datoat" )" != 0 ]; then
+              logbuff echo -ne "\x20**";
+              continue;
+            fi;
+
+            # remove any unpacked libraries in the /system APK directory since they are no longer needed
+            mount -o rw,remount -t auto /system;
+            test -d $sysapk/lib && rm -rf $sysapk/lib;
+
           else
-            # otherwise force copy libraries to /system respecting symlinks then clean up empty files
+            # otherwise force copy libraries to /system respecting symlinks then clean up empty files, abort if fails final total space check
             if [ -e /data/app/$i/lib/* ]; then
+              test -d $sysapk/oat && datoat=/data/app/$i/oat || unset datoat;
+              if [ "$(freespace-precise "$sysapk/$sysname.apk $sysapk/oat $sysapk/lib" "$datapk $datoat /data/app/$i/lib" )" != 0 ]; then
+                logbuff echo -ne "\x20**";
+                continue;
+              fi;
               mount -o rw,remount -t auto /system;
-              rm -f $sysapk/$sysname.apk;
               cp -RLf /data/app/$i/lib $sysapk;
               for j in `ls $sysapk/lib/*/*`; do
                 test ! -s $j && rm -f $j;
               done;
             fi;
 
-          fi;
+          fi; # end nozipbins test
+
           # if necessary force copy APK odex file to /system
-          mount -o rw,remount -t auto /system;
           if [ -d $sysapk/oat ]; then
             cp -fp /data/app/$i/oat $sysapk;
             cd $sysapk/oat/*/;
@@ -275,7 +316,8 @@ for i in $(ls /data/app/ | grep -E '^com.android|^com.chrome|^com.google.android
           # flag for cleanup on reboot following optimization
           touch /data/app/$i/integrated;
 
-        fi;
+        fi; # end integrated test
+
         # remove packages.xml entry for /data APK and ensure proper ownership/permissions
         if [ "$(grep "<updated-package name=\"${package}\"" $xml | grep '/>')" ]; then
           $bb sed -i "/<updated-package name=\"${package}\"/d" $xml;
@@ -292,29 +334,32 @@ for i in $(ls /data/app/ | grep -E '^com.android|^com.chrome|^com.google.android
             if [ ! -d $gbak ]; then
               mkdir -p $gbak;
               for rtperm in /data/system/users/*/runtime-permissions.xml; do
-                user=`basename $(dirname $rtperm)`;
-                cp -fp $rtperm $gbak/$user;
+                if [ -e "$rtperm" ]; then
+                  user=`basename $(dirname $rtperm)`;
+                  cp -fp $rtperm $gbak/$user;
+                  rm -f $rtperm;
+                fi;
               done;
-              rm -f $rtperm;
             fi;;
         esac;
 
-      fi;
+      fi; # end sdkver test
+
       mount -o ro,remount -t auto /system;
-      rm -rf $gtmp;
 
     else
       # clean up any duplicate packages that are not the current active copy
       rm -rf /data/app/$i;
 
-    fi;
-  elif [ -f /data/app/$i/integrated ]; then
+    fi; # end datver+sysver test
 
+  elif [ -f /data/app/$i/integrated ]; then
     # clean up to mimic pre-Lollipop (AOSP) behavior
     rm -rf /data/app/$package-*;
 
-  fi;
-done;
+  fi; # end sysapk test
+
+done; # end find unintegrated loop
 
 # global cleanups required on Lollipop (and above)
 if [ "$sdkver" -ge 21 ]; then
@@ -324,9 +369,9 @@ if [ "$sdkver" -ge 21 ]; then
   chown root.root /system/lib/*.so;
   $bb chmod 644 /system/lib/*.so;
   mount -o ro,remount -t auto /system;
-  rm -rf $gtmp;
 
 fi;
+rm -rf $gtmp;
 
 # write buffered log once /sdcard is available, fallback to a known working location if this fails
 counter3=0;
