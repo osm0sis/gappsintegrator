@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# chmod -R 755 /system/etc/init.d /system/su.d /su/su.d
+# chmod -R 755 /system/etc/init.d /system/su.d /su/su.d /sbin/supersu/su.d /magisk/.core/post-fs-data.d /sbin/.core/img/.core/post-fs-data.d
 #
 # ROM GApps Auto-Integration
 # osm0sis @ xda-developers
@@ -16,7 +16,11 @@ freespace-estimate() {
   libsize=0; buffer=4;
   if [ "$nozipbins" ]; then
     for entry in $(unzip -l $1 lib/* 2>>$out | tail -n +4 | awk '{ print $1 }'); do
-      test $entry != "--------" && libsize=$((libsize + entry)) || break;
+      case $entry in
+        ---------) ;; # skip top line displayed in some unzip list edge cases
+        --------) break;;
+        *) libsize=$((libsize + entry));;
+      esac;
     done;
     test $libsize -lt 1048576 && libsize=1 || libsize=$((libsize / 1048576));
   else
@@ -38,6 +42,13 @@ freespace-precise() {
   echo "free($free) + oldfiles($oldfiles) = total_space($((free + oldfiles))) ?> newfiles($newfiles)" >> $out;
   test $((free + oldfiles)) -gt $newfiles; echo $?;
 }
+
+# add support for Magisk by altering the actual mounted system partition
+test -e /magisk/.core/mirror && magisk=/magisk/.core/mirror;
+test -e /sbin/.core/mirror && magisk=/sbin/.core/mirror;
+
+# alter Magisk's post-fs-data.d PATH to prioritize actual mounted system over the included busybox
+test "$magisk" && export PATH="$magisk/system/bin:$magisk/system/xbin:$PATH";
 
 # group all commands and allow redirection of output for debugging
 test "$debugging" == 1 && out=/data/local/tmp/debug-gappsint.log || out=/dev/null;
@@ -63,17 +74,17 @@ done&
 
 # wait for /system to become remountable/writable, abort if it does not
 counter2=0;
-until [ "$(mount -o rw,remount -t auto /system >>$out; writable /system; mount -o ro,remount -t auto /system >>$out)" == 0 -o "$counter2" -gt "$syslimit" ]; do
+until [ "$(mount --help 2>/dev/null)" ] && [ "$(mount -o rw,remount -t auto $magisk/system >>$out; writable $magisk/system; mount -o ro,remount -t auto $magisk/system >>$out)" == 0 -o "$counter2" -gt "$syslimit" ]; do
   sleep 1;
   counter2=$((counter2 + 1));
 done;
 if [ "$counter2" -gt "$syslimit" ]; then
-  logbuff echo -ne "\n\x20* Fatal error: /system did not become remountable/writable during boot";
+  logbuff echo -ne "\n\x20* Fatal error: $magisk/system did not become remountable/writable during boot";
   abort=1;
 fi;
 
 # log earliest accurate processing start timestamp once date stops returning epoch in early boot
-until [ ! "$(date | grep '1970')" ]; do
+until [ "$(date 2>/dev/null)" ] && [ ! "$(date | grep '1970')" ]; do
   sleep 1;
 done;
 logbuff echo -n `date`;
@@ -118,7 +129,7 @@ test "$nozipbins" && logbuff echo -ne "\n\x20* -- using fallback method instead"
 
 # get SDK version to perform different actions due to /data/app layout changes
 sdkver=`getprop ro.build.version.sdk`;
-test ! "$sdkver" && sdkver=$(grep '^ro.build.version.sdk' /system/build.prop | cut -d= -f2);
+test ! "$sdkver" && sdkver=$(grep '^ro.build.version.sdk' $magisk/system/build.prop | cut -d= -f2);
 
 # find new unintegrated Google Apps APKs in /data
 for i in $(ls /data/app/ | grep -E '^com.android|^com.chrome|^com.google.android|^com.google.earth|^com.motorola'); do
@@ -142,7 +153,7 @@ for i in $(ls /data/app/ | grep -E '^com.android|^com.chrome|^com.google.android
     if [ "$datver" -gt "$sysver" ]; then
 
       logbuff echo -ne "\x20($datver > $sysver)";
-      echo -e "\n$i $sysapk";
+      echo -e "\n$i $magisk$sysapk";
       rm -rf $gtmp;
       mkdir -p $gtmp;
 
@@ -158,7 +169,7 @@ for i in $(ls /data/app/ | grep -E '^com.android|^com.chrome|^com.google.android
         esac;
 
         # skip current APK if it fails a free space check
-        if [ "$(freespace-estimate $datapk $sysapk)" != 0 ]; then
+        if [ "$(freespace-estimate $datapk $magisk$sysapk)" != 0 ]; then
           logbuff echo -ne "\x20*";
           continue;
         fi;
@@ -174,21 +185,21 @@ for i in $(ls /data/app/ | grep -E '^com.android|^com.chrome|^com.google.android
         # extract and force copy libraries to /system, abort if fails final total space check
         unzip /data/app/$i -d $gtmp lib/*;
         for j in $(ls $gtmp/lib/*/); do
-          liblist="$liblist /system/lib/$j";
+          liblist="$liblist $magisk/system/lib/$j";
         done;
-        if [ "$(freespace-precise "$sysapk $liblist" "$datapk $gtmp/lib/*/*" )" != 0 ]; then
+        if [ "$(freespace-precise "$magisk$sysapk $liblist" "$datapk $gtmp/lib/*/*" )" != 0 ]; then
           logbuff echo -ne "\x20**";
           continue;
         fi;
         $bb chmod 644 $gtmp/lib/*/*;
-        mount -o rw,remount -t auto /system;
-        rm -f $sysapk;
-        cp -fp $gtmp/lib/*/* /system/lib/;
+        mount -o rw,remount -t auto $magisk/system;
+        rm -f $magisk$sysapk;
+        cp -fp $gtmp/lib/*/* $magisk/system/lib/;
 
         # overwrite /system APK with new /data APK then fix permissions
-        cp -f $datapk $sysapk;
-        chown root.root $sysapk;
-        $bb chmod 644 $sysapk;
+        cp -f $datapk $magisk$sysapk;
+        chown root.root $magisk$sysapk;
+        $bb chmod 644 $magisk$sysapk;
 
       # Lollipop support
       elif [ "$sdkver" -le 22 ]; then
@@ -199,7 +210,7 @@ for i in $(ls /data/app/ | grep -E '^com.android|^com.chrome|^com.google.android
         if [ ! -f /data/app/$i/integrated ]; then
 
           # skip current APK if it fails a free space check
-          if [ "$(freespace-estimate $datapk $sysapk/$sysname.apk)" != 0 ]; then
+          if [ "$(freespace-estimate $datapk $magisk$sysapk/$sysname.apk)" != 0 ]; then
             logbuff echo -ne "\x20*";
             continue;
           fi;
@@ -210,8 +221,8 @@ for i in $(ls /data/app/ | grep -E '^com.android|^com.chrome|^com.google.android
             # workaround for Chrome not playing by the usual rules (per usual)
             case $package in
               com.android.chrome|com.chrome.*)
-                mount -o rw,remount -t auto /system;
-                rm -f $sysapk/lib/*/libchrome.so;;
+                mount -o rw,remount -t auto $magisk/system;
+                rm -f $magisk$sysapk/lib/*/libchrome.so;;
 
               *)
                 cp -fp $datapk $gtmp/preopt-$i.apk;
@@ -224,24 +235,24 @@ for i in $(ls /data/app/ | grep -E '^com.android|^com.chrome|^com.google.android
           fi; # end nozipbins test
 
           # abort if fails final total space check
-          if [ "$(freespace-precise "$sysapk" "$datapk /data/app/$i/lib" )" != 0 ]; then
+          if [ "$(freespace-precise "$magisk$sysapk" "$datapk /data/app/$i/lib" )" != 0 ]; then
             logbuff echo -ne "\x20**";
             continue;
           fi;
 
           # force copy libraries to /system respecting symlinks then clean up empty files
-          mount -o rw,remount -t auto /system;
-          rm -f $sysapk/$sysname.apk;
-          cp -RLf /data/app/$i/lib $sysapk;
-          for j in `ls $sysapk/lib/*/*`; do
+          mount -o rw,remount -t auto $magisk/system;
+          rm -f $magisk$sysapk/$sysname.apk;
+          cp -RLf /data/app/$i/lib $magisk$sysapk;
+          for j in `ls $magisk$sysapk/lib/*/*`; do
             test ! -s $j && rm -f $j;
           done;
 
           # overwrite /system APK with new /data APK then fix permissions
-          cp -fp $datapk $sysapk/$sysname.apk;
-          chown -R root.root $sysapk;
-          $bb chmod -R 755 $sysapk/lib;
-          $bb chmod 644 $sysapk/$sysname.apk $sysapk/lib/*/*;
+          cp -fp $datapk $magisk$sysapk/$sysname.apk;
+          chown -R root.root $magisk$sysapk;
+          $bb chmod -R 755 $magisk$sysapk/lib;
+          $bb chmod 644 $magisk$sysapk/$sysname.apk $magisk$sysapk/lib/*/*;
 
           # flag for cleanup on reboot following optimization
           touch /data/app/$i/integrated;
@@ -268,7 +279,7 @@ for i in $(ls /data/app/ | grep -E '^com.android|^com.chrome|^com.google.android
         if [ ! -f /data/app/$i/integrated ]; then
 
           # skip current APK if it fails a free space check
-          if [ "$(freespace-estimate $datapk $sysapk/$sysname.apk)" != 0 ]; then
+          if [ "$(freespace-estimate $datapk $magisk$sysapk/$sysname.apk)" != 0 ]; then
             logbuff echo -ne "\x20*";
             continue;
           fi;
@@ -284,27 +295,27 @@ for i in $(ls /data/app/ | grep -E '^com.android|^com.chrome|^com.google.android
             datapk=$gtmp/$i.apk;
 
             # abort if fails final total space check
-            test -d $sysapk/oat && datoat=/data/app/$i/oat || unset datoat;
-            if [ "$(freespace-precise "$sysapk/$sysname.apk $sysapk/oat $sysapk/lib" "$datapk $datoat" )" != 0 ]; then
+            test -d $magisk$sysapk/oat && datoat=/data/app/$i/oat || unset datoat;
+            if [ "$(freespace-precise "$magisk$sysapk/$sysname.apk $magisk$sysapk/oat $magisk$sysapk/lib" "$datapk $datoat" )" != 0 ]; then
               logbuff echo -ne "\x20**";
               continue;
             fi;
 
             # remove any unpacked libraries in the /system APK directory since they are no longer needed
-            mount -o rw,remount -t auto /system;
-            test -d $sysapk/lib && rm -rf $sysapk/lib;
+            mount -o rw,remount -t auto $magisk/system;
+            test -d $magisk$sysapk/lib && rm -rf $magisk$sysapk/lib;
 
           else
             # otherwise force copy libraries to /system respecting symlinks then clean up empty files, abort if fails final total space check
-            test -d $sysapk/oat && datoat=/data/app/$i/oat || unset datoat;
-            if [ "$(freespace-precise "$sysapk/$sysname.apk $sysapk/oat $sysapk/lib" "$datapk $datoat /data/app/$i/lib" )" != 0 ]; then
+            test -d $magisk$sysapk/oat && datoat=/data/app/$i/oat || unset datoat;
+            if [ "$(freespace-precise "$magisk$sysapk/$sysname.apk $magisk$sysapk/oat $magisk$sysapk/lib" "$datapk $datoat /data/app/$i/lib" )" != 0 ]; then
               logbuff echo -ne "\x20**";
               continue;
             fi;
             if [ -e /data/app/$i/lib/* ]; then
-              mount -o rw,remount -t auto /system;
-              cp -RLf /data/app/$i/lib $sysapk;
-              for j in `ls $sysapk/lib/*/*`; do
+              mount -o rw,remount -t auto $magisk/system;
+              cp -RLf /data/app/$i/lib $magisk$sysapk;
+              for j in `ls $magisk$sysapk/lib/*/*`; do
                 test ! -s $j && rm -f $j;
               done;
             fi;
@@ -312,18 +323,18 @@ for i in $(ls /data/app/ | grep -E '^com.android|^com.chrome|^com.google.android
           fi; # end nozipbins test
 
           # if necessary force copy APK odex file to /system
-          mount -o rw,remount -t auto /system;
-          if [ -d $sysapk/oat ]; then
-            cp -fp /data/app/$i/oat $sysapk;
-            cd $sysapk/oat/*/;
+          mount -o rw,remount -t auto $magisk/system;
+          if [ -d $magisk$sysapk/oat ]; then
+            cp -fp /data/app/$i/oat $magisk$sysapk;
+            cd $magisk$sysapk/oat/*/;
             mv base.odex $sysname.odex;
           fi;
 
           # overwrite /system APK with new /data APK then fix permissions
-          cp -fp $datapk $sysapk/$sysname.apk;
-          chown -R root.root $sysapk;
-          $bb chmod -R 755 $sysapk/lib $sysapk/oat;
-          $bb chmod 644 $sysapk/$sysname.apk $sysapk/lib/*/* $sysapk/oat/*/*;
+          cp -fp $datapk $magisk$sysapk/$sysname.apk;
+          chown -R root.root $magisk$sysapk;
+          $bb chmod -R 755 $magisk$sysapk/lib $magisk$sysapk/oat;
+          $bb chmod 644 $magisk$sysapk/$sysname.apk $magisk$sysapk/lib/*/* $magisk$sysapk/oat/*/*;
 
           # flag for cleanup on reboot following optimization
           touch /data/app/$i/integrated;
@@ -359,7 +370,7 @@ for i in $(ls /data/app/ | grep -E '^com.android|^com.chrome|^com.google.android
 
       fi; # end sdkver test
 
-      mount -o ro,remount -t auto /system;
+      mount -o ro,remount -t auto $magisk/system;
 
     else
       # clean up any duplicate packages that are not the current active copy
@@ -379,10 +390,12 @@ done; # end find unintegrated loop
 if [ "$sdkver" -ge 21 ]; then
 
   # fix /system/lib permissions to ensure libs copied via symlink are correct
-  mount -o rw,remount -t auto /system;
-  chown root.root /system/lib/*.so;
-  $bb chmod 644 /system/lib/*.so;
-  mount -o ro,remount -t auto /system;
+  mount -o rw,remount -t auto $magisk/system;
+  test "$magisk" && mount -o rw,remount -t auto /system;
+  chown root.root $magisk/system/lib/*.so;
+  $bb chmod 644 $magisk/system/lib/*.so;
+  mount -o ro,remount -t auto $magisk/system;
+  test "$magisk" && mount -o ro,remount -t auto /system;
 
 fi;
 rm -rf $gtmp;
