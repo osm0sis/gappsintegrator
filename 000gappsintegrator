@@ -23,7 +23,11 @@ freespace-estimate() {
         *) libsize=$((libsize + entry));;
       esac;
     done;
-    test $libsize -lt 1048576 && libsize=1 || libsize=$((libsize / 1048576));
+    if [ $libsize -lt 1048576 ]; then
+      libsize=1;
+    else
+      libsize=$((libsize / 1048576));
+    fi;
   else
     buffer=8;
   fi;
@@ -53,7 +57,8 @@ test -d /sbin/.magisk/mirror && magisk=/sbin/.magisk/mirror;
 test "$magisk" && export PATH="$magisk/system/bin:$magisk/system/xbin:$PATH";
 
 # group all commands and allow redirection of output for debugging
-test "$debugging" == 1 && out=/data/local/tmp/debug-gappsint.log || out=/dev/null;
+out=/dev/null;
+test "$debugging" == 1 && out=/data/local/tmp/debug-gappsint.log;
 (
 
 # run in an asynchronous subshell to not impede the boot with su.d/post-fs-data.d
@@ -313,7 +318,8 @@ for i in $(ls /data/app/ | grep -E '^com.android|^com.chrome|^com.google.android
             datapk=$gtmp/$i.apk;
 
             # abort if fails final total space check
-            test -d $magisk$sysapk/oat && datoat=/data/app/$i/oat || unset datoat;
+            datoat=/data/app/$i/oat;
+            test -d $magisk$sysapk/oat || unset datoat;
             if [ "$(freespace-precise "$magisk$sysapk/$sysname.apk $magisk$sysapk/oat $magisk$sysapk/lib" "$datapk $datoat" )" != 0 ]; then
               logbuff echo -ne "\x20**";
               continue;
@@ -327,7 +333,8 @@ for i in $(ls /data/app/ | grep -E '^com.android|^com.chrome|^com.google.android
 
           else
             # otherwise force copy libraries to /system respecting symlinks then clean up empty files, abort if fails final total space check
-            test -d $magisk$sysapk/oat && datoat=/data/app/$i/oat || unset datoat;
+            datoat=/data/app/$i/oat;
+            test -d $magisk$sysapk/oat || unset datoat;
             if [ "$(freespace-precise "$magisk$sysapk/$sysname.apk $magisk$sysapk/oat $magisk$sysapk/lib" "$datapk $datoat /data/app/$i/lib" )" != 0 ]; then
               logbuff echo -ne "\x20**";
               continue;
