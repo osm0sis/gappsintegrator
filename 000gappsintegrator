@@ -35,7 +35,7 @@ freespace-estimate() {
   sysapksize=$(du -m $2 | awk '{ print $1 }');
   need=$((datapksize + libsize - sysapksize + buffer));
   echo "free($free) ?> need($need) = datapksize($datapksize) + libsize($libsize) - sysapksize($sysapksize) + buffer($buffer)" >> $out;
-  test $free -gt $need; echo $?;
+  [ $free -gt $need ]; echo $?;
 }
 
 # determine if final replacement APK and library sizes will fit in /system
@@ -45,20 +45,21 @@ freespace-precise() {
   oldfiles=$(du -mc $1 2>>$out | tail -n1 | awk '{ print $1 }');
   newfiles=$(du -mc $2 2>>$out | tail -n1 | awk '{ print $1 }');
   echo "free($free) + oldfiles($oldfiles) = total_space($((free + oldfiles))) ?> newfiles($newfiles)" >> $out;
-  test $((free + oldfiles)) -gt $newfiles; echo $?;
+  [ $((free + oldfiles)) -gt $newfiles ]; echo $?;
 }
 
 # add support for Magisk by altering the actual mounted system partition
-test -d /magisk/.core/mirror && magisk=/magisk/.core/mirror;
-test -d /sbin/.core/mirror && magisk=/sbin/.core/mirror;
-test -d /sbin/.magisk/mirror && magisk=/sbin/.magisk/mirror;
+[ -d /magisk/.core/mirror ] && magisk=/magisk/.core/mirror;
+[ -d /sbin/.core/mirror ] && magisk=/sbin/.core/mirror;
+[ -d /sbin/.magisk/mirror ] && magisk=/sbin/.magisk/mirror;
+[ -e /dev/*/.magisk/mirror ] && magisk=$(echo /dev/*/.magisk/mirror);
 
 # alter Magisk's post-fs-data.d PATH to prioritize actual mounted system over the included busybox
-test "$magisk" && export PATH="$magisk/system/bin:$magisk/system/xbin:$PATH";
+[ "$magisk" ] && export PATH="$magisk/system/bin:$magisk/system/xbin:$PATH";
 
 # group all commands and allow redirection of output for debugging
 out=/dev/null;
-test "$debugging" == 1 && out=/data/local/tmp/debug-gappsint.log;
+[ "$debugging" == 1 ] && out=/data/local/tmp/debug-gappsint.log;
 (
 
 # run in an asynchronous subshell to not impede the boot with su.d/post-fs-data.d
@@ -139,17 +140,17 @@ for i in zip zipalign; do
     nozipbins=1;
   fi;
 done;
-test "$nozipbins" && logbuff echo -ne "\n\x20* -- using fallback method instead";
+[ "$nozipbins" ] && logbuff echo -ne "\n\x20* -- using fallback method instead";
 
 # get SDK version to perform different actions due to /data/app layout changes
 sdkver=`getprop ro.build.version.sdk`;
-test ! "$sdkver" && sdkver=$(grep '^ro.build.version.sdk' $magisk/system/build.prop | cut -d= -f2);
+[ ! "$sdkver" ] && sdkver=$(grep '^ro.build.version.sdk' $magisk/system/build.prop | cut -d= -f2);
 
 # find new unintegrated Google Apps APKs in /data
 for i in $(ls /data/app/ | grep -E '^com.android|^com.chrome|^com.google.android|^com.google.earth|^com.motorola'); do
 
   # skip all if script environment is broken
-  test "$abort" && break;
+  [ "$abort" ] && break;
 
   # find equivalent /system APK name and only process if it exists
   xml=/data/system/packages.xml;
@@ -265,7 +266,7 @@ for i in $(ls /data/app/ | grep -E '^com.android|^com.chrome|^com.google.android
             rm -f $magisk$sysapk/$sysname.apk;
             cp -RLf /data/app/$i/lib $magisk$sysapk;
             for j in `ls $magisk$sysapk/lib/*/*`; do
-              test ! -s $j && rm -f $j;
+              [ ! -s $j ] && rm -f $j;
             done;
 
             # overwrite /system APK with new /data APK then fix permissions
@@ -319,7 +320,7 @@ for i in $(ls /data/app/ | grep -E '^com.android|^com.chrome|^com.google.android
 
             # abort if fails final total space check
             datoat=/data/app/$i/oat;
-            test -d $magisk$sysapk/oat || unset datoat;
+            [ -d $magisk$sysapk/oat ] || unset datoat;
             if [ "$(freespace-precise "$magisk$sysapk/$sysname.apk $magisk$sysapk/oat $magisk$sysapk/lib" "$datapk $datoat" )" != 0 ]; then
               logbuff echo -ne "\x20**";
               continue;
@@ -328,13 +329,13 @@ for i in $(ls /data/app/ | grep -E '^com.android|^com.chrome|^com.google.android
             if [ "$dryrun" == 0 ]; then
               # remove any unpacked libraries in the /system APK directory since they are no longer needed
               mount -o rw,remount -t auto $magisk/system;
-              test -d $magisk$sysapk/lib && rm -rf $magisk$sysapk/lib;
+              [ -d $magisk$sysapk/lib ] && rm -rf $magisk$sysapk/lib;
             fi;
 
           else
             # otherwise force copy libraries to /system respecting symlinks then clean up empty files, abort if fails final total space check
             datoat=/data/app/$i/oat;
-            test -d $magisk$sysapk/oat || unset datoat;
+            [ -d $magisk$sysapk/oat ] || unset datoat;
             if [ "$(freespace-precise "$magisk$sysapk/$sysname.apk $magisk$sysapk/oat $magisk$sysapk/lib" "$datapk $datoat /data/app/$i/lib" )" != 0 ]; then
               logbuff echo -ne "\x20**";
               continue;
@@ -343,7 +344,7 @@ for i in $(ls /data/app/ | grep -E '^com.android|^com.chrome|^com.google.android
               mount -o rw,remount -t auto $magisk/system;
               cp -RLf /data/app/$i/lib $magisk$sysapk;
               for j in `ls $magisk$sysapk/lib/*/*`; do
-                test ! -s $j && rm -f $j;
+                [ ! -s $j ] && rm -f $j;
               done;
             fi;
 
@@ -426,11 +427,11 @@ if [ "$sdkver" -ge 21 -a "$dryrun" == 0 ]; then
 
   # fix /system/lib permissions to ensure libs copied via symlink are correct
   mount -o rw,remount -t auto $magisk/system;
-  test "$magisk" && mount -o rw,remount -t auto /system;
+  [ "$magisk" ] && mount -o rw,remount -t auto /system;
   chown root.root $magisk/system/lib/*.so;
   $bb chmod 644 $magisk/system/lib/*.so;
   mount -o ro,remount -t auto $magisk/system;
-  test "$magisk" && mount -o ro,remount -t auto /system;
+  [ "$magisk" ] && mount -o ro,remount -t auto /system;
 
 fi;
 rm -rf $gtmp;
@@ -441,13 +442,13 @@ until [ "$(writable /sdcard)" == 0 -o "$counter3" -gt "$sdlimit" ]; do
   sleep 1;
   counter3=$((counter3 + 1));
 done;
-test "$counter3" -gt "$sdlimit" && log=/data/local/gapps-integrator.log;
-test ! -s $log && echo -e "## GApps Auto-Integration Script Log\n#\n# ~ = forced permissions list rebuild,\n# * = not enough free space, ! = excluded\n" > $log;
+[ "$counter3" -gt "$sdlimit" ] && log=/data/local/gapps-integrator.log;
+[ ! -s $log ] && echo -e "## GApps Auto-Integration Script Log\n#\n# ~ = forced permissions list rebuild,\n# * = not enough free space, ! = excluded\n" > $log;
 echo "$logbuff" >> $log;
 echo "---" >> $log;
 
 # limit log length to ~16Kb (when exceeded) by removing oldest entry
-test "$(du -k $log | cut -f1)" -gt 16 && $bb sed -i "/$(grep -m1 -vE '^$|^#.*$' $log)/,/^\s*$/d" $log;
+[ "$(du -k $log | cut -f1)" -gt 16 ] && $bb sed -i "/$(grep -m1 -vE '^$|^#.*$' $log)/,/^\s*$/d" $log;
 
 # restore runtime-permissions.xml backup files to maintain granted user app permissions and reboot after boot is completed
 counter4=0;
